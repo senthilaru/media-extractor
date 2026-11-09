@@ -1,0 +1,26 @@
+# Rust build artifacts
+target/
+debug/
+release/
+*.rs.bk
+*.rlib
+*.prof*
+
+# IDE & Editor files
+.idea/
+.vscode/
+*.swp
+*.tmp
+
+# Logs & Environment
+*.log
+.env*
+!.env.example
+
+# macOS / OS artifacts
+.DS_Store
+Thumbs.db
+
+.cargo
+.agents
+out.txt

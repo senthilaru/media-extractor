@@ -1,0 +1,1 @@
+Test sample file for non-media verification.
