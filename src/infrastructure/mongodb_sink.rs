@@ -1,10 +1,16 @@
-use mongodb::bson::{doc, Document};
-use mongodb::options::{ClientOptions, IndexOptions, UpdateOneModel, WriteModel};
+use chrono::{DateTime, Utc};
+use futures::stream::TryStreamExt;
+use mongodb::bson::{doc, Bson, Document};
+use mongodb::options::{ClientOptions, FindOptions, IndexOptions, UpdateOneModel, WriteModel};
 use mongodb::{Client, Collection, Database, IndexModel, Namespace};
+use std::collections::HashMap;
 use std::time::Duration;
 
 use crate::domain::errors::StorageError;
-use crate::domain::metadata_models::{DatabaseSinkConfig, MediaMetadataDocument};
+use crate::domain::metadata_models::{
+    DatabaseSinkConfig, FilterEvaluationResult, MediaMetadataDocument,
+};
+use crate::domain::models::DiscoveredMediaItem;
 use crate::domain::ports::{BatchWriteStats, MetadataStorageSink};
 
 /// Production MongoDB storage sink adapter providing idempotent bulk upserts.
@@ -196,6 +202,141 @@ impl MetadataStorageSink for MongoDbStorageSink {
 
     async fn flush(&self) -> Result<(), StorageError> {
         Ok(())
+    }
+
+    async fn filter_unmodified_items(
+        &self,
+        items: &[DiscoveredMediaItem],
+    ) -> Result<FilterEvaluationResult, StorageError> {
+        if items.is_empty() {
+            return Ok(FilterEvaluationResult::default());
+        }
+
+        let paths: Vec<String> = items
+            .iter()
+            .map(|item| item.path.to_string_lossy().to_string())
+            .collect();
+
+        let filter = doc! {
+            "file_context.file_path": { "$in": &paths }
+        };
+
+        let projection = doc! {
+            "file_context.file_path": 1,
+            "file_context.file_size_bytes": 1,
+            "file_context.modified_at": 1,
+        };
+
+        let find_options = FindOptions::builder().projection(projection).build();
+
+        let mut attempts = 0;
+        let mut backoff = Duration::from_millis(100);
+
+        let mut cursor = loop {
+            attempts += 1;
+            match self
+                .collection
+                .find(filter.clone())
+                .with_options(find_options.clone())
+                .await
+            {
+                Ok(cursor) => break cursor,
+                Err(err) => {
+                    let is_transient = err
+                        .contains_label(mongodb::error::TRANSIENT_TRANSACTION_ERROR)
+                        || err.contains_label(mongodb::error::UNKNOWN_TRANSACTION_COMMIT_RESULT)
+                        || err.to_string().contains("timed out")
+                        || err.to_string().contains("connection closed");
+
+                    if is_transient && attempts <= self.config.max_retries {
+                        tracing::warn!(
+                            attempt = attempts,
+                            max_retries = self.config.max_retries,
+                            error = %err,
+                            "Transient MongoDB query error during incremental filtering; retrying"
+                        );
+                        tokio::time::sleep(backoff).await;
+                        backoff *= 2;
+                        continue;
+                    }
+
+                    return Err(StorageError::QueryFailed {
+                        collection: self.config.collection_name.clone(),
+                        message: err.to_string(),
+                    });
+                }
+            }
+        };
+
+        let mut existing_map: HashMap<String, (u64, Option<DateTime<Utc>>)> = HashMap::new();
+
+        while let Some(doc) = cursor
+            .try_next()
+            .await
+            .map_err(|e| StorageError::QueryFailed {
+                collection: self.config.collection_name.clone(),
+                message: format!("Error reading cursor during incremental filtering: {}", e),
+            })?
+        {
+            if let Ok(file_ctx) = doc.get_document("file_context") {
+                let file_path = file_ctx.get_str("file_path").ok();
+                let file_size: Option<u64> = match file_ctx.get("file_size_bytes") {
+                    Some(Bson::Int64(i)) if *i >= 0 => Some(*i as u64),
+                    Some(Bson::Int32(i)) if *i >= 0 => Some(*i as u64),
+                    _ => None,
+                };
+                let modified_at: Option<DateTime<Utc>> = match file_ctx.get("modified_at") {
+                    Some(Bson::DateTime(dt)) => {
+                        DateTime::from_timestamp_millis(dt.timestamp_millis())
+                    }
+                    Some(Bson::String(s)) => DateTime::parse_from_rfc3339(s)
+                        .ok()
+                        .map(|d| d.with_timezone(&Utc)),
+                    _ => None,
+                };
+
+                if let (Some(path), Some(size)) = (file_path, file_size) {
+                    existing_map.insert(path.to_string(), (size, modified_at));
+                }
+            }
+        }
+
+        let mut unmodified_items = Vec::new();
+        let mut items_to_extract = Vec::new();
+        let mut skipped_bytes: u64 = 0;
+        let mut extract_bytes: u64 = 0;
+
+        for item in items {
+            let path_key = item.path.to_string_lossy();
+            if let Some((stored_size, stored_mtime)) = existing_map.get(path_key.as_ref()) {
+                let size_matches = item.file_size_bytes == *stored_size;
+
+                let mtime_matches = match (item.modified_at, stored_mtime) {
+                    (Some(item_st), Some(db_dt)) => {
+                        let item_dt: DateTime<Utc> = item_st.into();
+                        (item_dt.timestamp_millis() - db_dt.timestamp_millis()).abs() <= 1000
+                    }
+                    (None, None) => true,
+                    _ => false,
+                };
+
+                if size_matches && mtime_matches {
+                    skipped_bytes = skipped_bytes.saturating_add(item.file_size_bytes);
+                    unmodified_items.push(item.clone());
+                    continue;
+                }
+            }
+
+            extract_bytes = extract_bytes.saturating_add(item.file_size_bytes);
+            items_to_extract.push(item.clone());
+        }
+
+        Ok(FilterEvaluationResult {
+            unmodified_items,
+            items_to_extract,
+            skipped_bytes,
+            extract_bytes,
+        })
     }
 }
 

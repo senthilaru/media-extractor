@@ -68,6 +68,7 @@ async fn test_perceptual_thumbnail_clustering() {
     let fp_config = FingerprintConfig {
         enable_perceptual: true,
         enable_rotation: true,
+        ..Default::default()
     };
     let dedup_config = DeduplicationConfig {
         similarity_threshold: 10,
@@ -106,6 +107,7 @@ async fn test_low_entropy_images_not_clustered() {
     let fp_config = FingerprintConfig {
         enable_perceptual: true,
         enable_rotation: true,
+        ..Default::default()
     };
     let dedup_config = DeduplicationConfig {
         similarity_threshold: 10,

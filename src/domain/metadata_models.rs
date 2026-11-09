@@ -72,6 +72,23 @@ pub struct FileContext {
 
     /// Media category (`Photo`, `Video`, `RawPhoto`)
     pub media_category: MediaCategory,
+
+    /// Filesystem modification timestamp (mtime) in UTC
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub modified_at: Option<DateTime<Utc>>,
+}
+
+/// Result of evaluating a batch of discovered items against existing database records.
+#[derive(Debug, Clone, Default)]
+pub struct FilterEvaluationResult {
+    /// Discovered items verified as already present in database with matching size and timestamp
+    pub unmodified_items: Vec<crate::domain::models::DiscoveredMediaItem>,
+    /// Items that are new or modified and must be extracted
+    pub items_to_extract: Vec<crate::domain::models::DiscoveredMediaItem>,
+    /// Total byte size of unmodified items
+    pub skipped_bytes: u64,
+    /// Total byte size of items to extract
+    pub extract_bytes: u64,
 }
 
 /// Capture datetime decomposed into integer calendar facets for MongoDB querying.

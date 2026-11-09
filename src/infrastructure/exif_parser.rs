@@ -117,6 +117,11 @@ impl MediaMetadataExtractor for ExifMetadataExtractor {
             .unwrap_or("")
             .to_lowercase();
 
+        let modified_at = item
+            .modified_at
+            .or_else(|| std::fs::metadata(path).ok()?.modified().ok())
+            .map(|st| st.into());
+
         let file_context = FileContext {
             scanned_root: root,
             file_path: path.clone(),
@@ -125,6 +130,7 @@ impl MediaMetadataExtractor for ExifMetadataExtractor {
             file_size_bytes: item.file_size_bytes,
             extension,
             media_category: item.category,
+            modified_at,
         };
 
         let mut warnings = Vec::new();

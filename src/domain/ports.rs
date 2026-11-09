@@ -9,11 +9,12 @@ use crate::domain::dedup_models::{
 use crate::domain::errors::{
     DeduplicationError, ExtractionError, FingerprintError, ScanError, StorageError,
 };
-use crate::domain::metadata_models::MediaMetadataDocument;
+use crate::domain::metadata_models::{FilterEvaluationResult, MediaMetadataDocument};
 use crate::domain::models::{
     DiscoveredMediaItem, DiscoveryBatch, MediaCategory, ScanErrorRecord, ScanSession,
     SessionMetrics,
 };
+use crate::domain::progress_models::{ExecutionSummary, OperationalPhase, ScanProgressSnapshot};
 
 /// Configuration options for a directory scan run.
 #[derive(Debug, Clone)]
@@ -168,4 +169,52 @@ pub trait MetadataStorageSink: Send + Sync {
 
     /// Flushes buffered operations and closes connection pools.
     async fn flush(&self) -> Result<(), StorageError>;
+
+    /// Evaluates discovered media items against the database index to filter out already indexed, unmodified items.
+    async fn filter_unmodified_items(
+        &self,
+        items: &[DiscoveredMediaItem],
+    ) -> Result<FilterEvaluationResult, StorageError>;
+}
+
+/// Port for reporting live progress updates and phase transitions.
+pub trait ProgressReporter: Send + Sync {
+    /// Update the current operational phase.
+    fn set_phase(&self, phase: OperationalPhase);
+
+    /// Record newly discovered items and cumulative byte volume.
+    fn record_discovered(&self, count: u64, bytes: u64);
+
+    /// Mark that directory traversal discovery has finished.
+    fn set_discovery_complete(&self);
+
+    /// Record extracted/processed items and byte volume.
+    fn record_processed(&self, count: u64, bytes: u64);
+
+    /// Record items skipped because they are already indexed and unmodified.
+    fn record_skipped(&self, count: u64, bytes: u64);
+
+    /// Record items persisted to storage.
+    fn record_persisted(&self, count: u64);
+
+    /// Record extraction error or skip.
+    fn record_error(&self);
+
+    /// Record extraction warning.
+    fn record_warning(&self);
+
+    /// Get current progress snapshot.
+    fn snapshot(&self) -> ScanProgressSnapshot;
+
+    /// Finish tracking and produce execution summary.
+    fn finish(&self, cancelled: bool) -> ExecutionSummary;
+}
+
+/// Port for consuming progress updates and rendering or transmitting them.
+pub trait ProgressSink: Send + Sync {
+    /// Render or emit a progress snapshot.
+    fn render_progress(&self, snapshot: &ScanProgressSnapshot);
+
+    /// Emit the final execution summary report.
+    fn render_summary(&self, summary: &ExecutionSummary);
 }

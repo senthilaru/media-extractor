@@ -12,6 +12,7 @@ use crate::domain::metadata_models::{
 };
 use crate::domain::models::{DiscoveredMediaItem, DiscoveryBatch, MediaCategory};
 use crate::domain::ports::{BatchMetadataExtractor, MediaFingerprinter, MediaMetadataExtractor};
+use crate::domain::progress_models::{ExtractionMode, ExtractionPerformanceProfile};
 use crate::infrastructure::blake3_hasher::Blake3MediaHasher;
 use crate::infrastructure::exif_parser::ExifMetadataExtractor;
 use crate::infrastructure::video_parser::VideoMetadataExtractor;
@@ -23,6 +24,7 @@ pub struct MetadataExtractionEngine {
     video_extractor: Arc<VideoMetadataExtractor>,
     hasher: Arc<Blake3MediaHasher>,
     counters: Arc<AtomicExtractionCounters>,
+    performance_profile: ExtractionPerformanceProfile,
 }
 
 impl Default for MetadataExtractionEngine {
@@ -38,7 +40,29 @@ impl MetadataExtractionEngine {
             video_extractor: Arc::new(VideoMetadataExtractor::new()),
             hasher: Arc::new(Blake3MediaHasher::new()),
             counters: Arc::new(AtomicExtractionCounters::new()),
+            performance_profile: ExtractionPerformanceProfile::default(),
         }
+    }
+
+    /// Construct engine configured with an explicit performance profile.
+    pub fn with_performance_profile(profile: ExtractionPerformanceProfile) -> Self {
+        Self {
+            exif_extractor: Arc::new(ExifMetadataExtractor::new()),
+            video_extractor: Arc::new(VideoMetadataExtractor::new()),
+            hasher: Arc::new(Blake3MediaHasher::new()),
+            counters: Arc::new(AtomicExtractionCounters::new()),
+            performance_profile: profile,
+        }
+    }
+
+    /// Set or update the performance profile.
+    pub fn set_performance_profile(&mut self, profile: ExtractionPerformanceProfile) {
+        self.performance_profile = profile;
+    }
+
+    /// Access active performance profile.
+    pub fn performance_profile(&self) -> &ExtractionPerformanceProfile {
+        &self.performance_profile
     }
 
     /// Access the thread-safe atomic extraction counters.
@@ -87,6 +111,11 @@ impl MetadataExtractionEngine {
             .unwrap_or("")
             .to_lowercase();
 
+        let modified_at = item
+            .modified_at
+            .or_else(|| std::fs::metadata(&item.path).ok()?.modified().ok())
+            .map(|st| st.into());
+
         let file_context = FileContext {
             scanned_root: root,
             file_path: item.path.clone(),
@@ -95,6 +124,7 @@ impl MetadataExtractionEngine {
             file_size_bytes: item.file_size_bytes,
             extension,
             media_category: item.category,
+            modified_at,
         };
 
         let modified = std::fs::metadata(&item.path)
@@ -159,21 +189,28 @@ impl MediaMetadataExtractor for MetadataExtractionEngine {
             }
         };
 
-        // Automatically compute cryptographic & perceptual content fingerprints
-        let fp_config = FingerprintConfig::default();
-        match self.hasher.fingerprint_file(item, Some(&doc), &fp_config) {
-            Ok(fp) => {
-                doc.fingerprint = Some(fp);
-            }
-            Err(err) => {
-                tracing::warn!(
-                    path = %item.path.display(),
-                    error = %err,
-                    "Content fingerprinting failed; recording diagnostic warning"
-                );
-                doc.extraction_status
-                    .warnings
-                    .push(format!("Fingerprint error: {}", err));
+        // Automatically compute cryptographic & perceptual content fingerprints if not in Fast mode
+        if self.performance_profile.mode != ExtractionMode::Fast {
+            let fp_config = FingerprintConfig {
+                enable_perceptual: self.performance_profile.enable_perceptual,
+                enable_rotation: self.performance_profile.enable_perceptual,
+                enable_cryptographic_hash: self.performance_profile.enable_cryptographic_hash,
+                max_hash_size_bytes: self.performance_profile.max_hash_size_bytes,
+            };
+            match self.hasher.fingerprint_file(item, Some(&doc), &fp_config) {
+                Ok(fp) => {
+                    doc.fingerprint = Some(fp);
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        path = %item.path.display(),
+                        error = %err,
+                        "Content fingerprinting failed; recording diagnostic warning"
+                    );
+                    doc.extraction_status
+                        .warnings
+                        .push(format!("Fingerprint error: {}", err));
+                }
             }
         }
 

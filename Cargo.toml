@@ -25,7 +25,9 @@ kamadak-exif = "0.6"
 blake3 = { version = "1.8", features = ["rayon", "mmap"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 mongodb = "3.2"
+futures = "0.3"
 dotenvy = "0.15"
+indicatif = "0.17"
 
 [dev-dependencies]
 tempfile = "3.14"

@@ -122,6 +122,9 @@ pub enum StorageError {
         is_transient: bool,
     },
 
+    #[error("Database query failed on collection '{collection}': {message}")]
+    QueryFailed { collection: String, message: String },
+
     #[error("Failed to serialize document to BSON: {0}")]
     SerializationError(String),
 

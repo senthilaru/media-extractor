@@ -168,6 +168,8 @@ pub struct DeduplicationSummary {
 pub struct FingerprintConfig {
     pub enable_perceptual: bool,
     pub enable_rotation: bool,
+    pub enable_cryptographic_hash: bool,
+    pub max_hash_size_bytes: Option<u64>,
 }
 
 impl Default for FingerprintConfig {
@@ -175,6 +177,8 @@ impl Default for FingerprintConfig {
         Self {
             enable_perceptual: true,
             enable_rotation: true,
+            enable_cryptographic_hash: true,
+            max_hash_size_bytes: Some(100 * 1024 * 1024),
         }
     }
 }

@@ -134,6 +134,7 @@ fn test_unified_recursive_directory_scan_stdout() {
     let output = Command::new(BIN_PATH)
         .arg(&fixture_dir)
         .arg("-q") // quiet mode to suppress stderr heartbeat
+        .env("MONGODB_URI", "")
         .output()
         .expect("Failed to execute directory scan");
 
@@ -201,6 +202,7 @@ fn test_unified_recursive_directory_scan_to_output_file() {
         .arg(&fixture_dir)
         .arg("-o")
         .arg(&out_file)
+        .env("MONGODB_URI", "")
         .output()
         .expect("Failed to execute directory scan with -o flag");
 

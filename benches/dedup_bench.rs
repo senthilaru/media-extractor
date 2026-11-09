@@ -61,6 +61,7 @@ fn bench_fingerprint_file_throughput(c: &mut Criterion) {
     let config = FingerprintConfig {
         enable_perceptual: true,
         enable_rotation: true,
+        ..Default::default()
     };
 
     c.bench_function("fingerprint_file_photo_phash_and_crypto", |b| {

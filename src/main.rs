@@ -5,6 +5,7 @@ use std::time::Instant;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 
 use metadata_extractor::application::engine::ScanEngine;
+use metadata_extractor::application::pipeline::ExtractionPipeline;
 use metadata_extractor::application::MetadataExtractionEngine;
 use metadata_extractor::domain::dedup_models::{
     DeduplicationConfig, DeduplicationSummary, DuplicateCluster, FingerprintConfig,
@@ -18,9 +19,11 @@ use metadata_extractor::domain::ports::{
     BatchMetadataExtractor, DeduplicationEngine, DirectoryScanner, MediaClassifier,
     MediaFingerprinter, MediaMetadataExtractor, MetadataStorageSink, ScanConfig,
 };
+use metadata_extractor::domain::progress_models::{ExtractionMode, ExtractionPerformanceProfile};
 use metadata_extractor::infrastructure::blake3_hasher::Blake3MediaHasher;
 use metadata_extractor::infrastructure::classifier::PhfMediaClassifier;
 use metadata_extractor::infrastructure::mongodb_sink::MongoDbStorageSink;
+use metadata_extractor::infrastructure::terminal_progress::IndicatifTerminalProgress;
 use metadata_extractor::MediaDeduplicationEngine;
 
 #[derive(Parser, Debug)]
@@ -73,6 +76,35 @@ struct Cli {
     /// Target collection name within the MongoDB database (defaults to 'media_assets')
     #[arg(long, visible_alias = "db-collection", env = "MONGODB_COLLECTION")]
     collection: Option<String>,
+
+    /// Enable high-speed metadata-only extraction; bypass full-file bitwise and perceptual hashing
+    #[arg(short = 'f', long, default_value_t = false, env = "MEDIA_FAST_MODE")]
+    fast: bool,
+
+    /// Explicit extraction performance mode ('fast', 'balanced', 'full')
+    #[arg(long, value_enum, env = "MEDIA_EXTRACTION_MODE")]
+    mode: Option<ExtractionMode>,
+
+    /// Skip full-file bitwise hashing for files exceeding this size threshold in MB
+    #[arg(long, default_value_t = 100, env = "MEDIA_MAX_HASH_SIZE_MB")]
+    max_hash_size: u64,
+
+    /// Number of concurrent batch extraction workers
+    #[arg(long, env = "MEDIA_WORKERS")]
+    workers: Option<usize>,
+
+    /// Emit progress telemetry as discrete JSON lines instead of ANSI progress bar
+    #[arg(long, default_value_t = false, env = "MEDIA_JSON_TELEMETRY")]
+    json_telemetry: bool,
+
+    /// Force complete re-extraction of all files, bypassing database incremental change pre-filtering
+    #[arg(
+        long,
+        visible_alias = "reindex",
+        default_value_t = false,
+        env = "MEDIA_FORCE_REINDEX"
+    )]
+    force: bool,
 
     #[command(subcommand)]
     command: Option<Commands>,
@@ -215,6 +247,35 @@ struct ExtractArgs {
     /// Target collection name within the MongoDB database (defaults to 'media_assets')
     #[arg(long, visible_alias = "db-collection", env = "MONGODB_COLLECTION")]
     collection: Option<String>,
+
+    /// Enable high-speed metadata-only extraction; bypass full-file bitwise and perceptual hashing
+    #[arg(short = 'f', long, default_value_t = false, env = "MEDIA_FAST_MODE")]
+    fast: bool,
+
+    /// Explicit extraction performance mode ('fast', 'balanced', 'full')
+    #[arg(long, value_enum, env = "MEDIA_EXTRACTION_MODE")]
+    mode: Option<ExtractionMode>,
+
+    /// Skip full-file bitwise hashing for files exceeding this size threshold in MB
+    #[arg(long, default_value_t = 100, env = "MEDIA_MAX_HASH_SIZE_MB")]
+    max_hash_size: u64,
+
+    /// Number of concurrent batch extraction workers
+    #[arg(long, env = "MEDIA_WORKERS")]
+    workers: Option<usize>,
+
+    /// Emit progress telemetry as discrete JSON lines instead of ANSI progress bar
+    #[arg(long, default_value_t = false, env = "MEDIA_JSON_TELEMETRY")]
+    json_telemetry: bool,
+
+    /// Force complete re-extraction of all files, bypassing database incremental change pre-filtering
+    #[arg(
+        long,
+        visible_alias = "reindex",
+        default_value_t = false,
+        env = "MEDIA_FORCE_REINDEX"
+    )]
+    force: bool,
 }
 
 #[derive(Parser, Debug)]
@@ -309,6 +370,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             profile: cli.profile,
             mongodb_uri: cli.mongodb_uri,
             collection: cli.collection,
+            fast: cli.fast,
+            mode: cli.mode,
+            max_hash_size: cli.max_hash_size,
+            workers: cli.workers,
+            json_telemetry: cli.json_telemetry,
+            force: cli.force,
         };
         run_extract(args).await?;
     } else {
@@ -443,200 +510,141 @@ async fn run_scan(args: ScanArgs) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn run_extract(args: ExtractArgs) -> Result<(), Box<dyn std::error::Error>> {
-    let start_time = Instant::now();
-    let engine = MetadataExtractionEngine::new();
+    let mode = if args.fast {
+        ExtractionMode::Fast
+    } else {
+        args.mode.unwrap_or(ExtractionMode::Balanced)
+    };
+
+    let max_hash_size_bytes = if mode == ExtractionMode::Fast {
+        None
+    } else {
+        Some(args.max_hash_size * 1024 * 1024)
+    };
+
+    let profile = ExtractionPerformanceProfile {
+        mode,
+        max_hash_size_bytes,
+        enable_perceptual: mode != ExtractionMode::Fast,
+        enable_cryptographic_hash: mode != ExtractionMode::Fast,
+        worker_concurrency: args.workers.unwrap_or_else(|| {
+            std::thread::available_parallelism()
+                .map(|p| p.get())
+                .unwrap_or(8)
+        }),
+        batch_size: args.batch_size,
+        channel_capacity: args.channel_capacity,
+        update_interval_ms: 250,
+        force_reindex: args.force,
+    };
+
+    let engine = MetadataExtractionEngine::with_performance_profile(profile.clone());
     let quiet = args.quiet;
 
     // Initialize MongoDB sink if URI is provided (fails fast if connection/auth fails)
-    let mongo_sink = if let Some(ref raw_uri) = args.mongodb_uri {
-        let env_password = std::env::var("MONGODB_PASSWORD").ok();
-        let interpolated_uri =
-            DatabaseSinkConfig::interpolate_secret(raw_uri, env_password.as_deref());
-        let config = DatabaseSinkConfig::new(interpolated_uri, args.collection.clone());
+    let mongo_sink =
+        if let Some(raw_uri) = args.mongodb_uri.as_deref().filter(|s| !s.trim().is_empty()) {
+            let env_password = std::env::var("MONGODB_PASSWORD").ok();
+            let interpolated_uri =
+                DatabaseSinkConfig::interpolate_secret(raw_uri, env_password.as_deref());
+            let config = DatabaseSinkConfig::new(interpolated_uri, args.collection.clone());
 
-        // Fail fast if profile validation fails (exit code 2 per CLI contract)
-        if let Err(err) = config.validate_for_profile(args.profile) {
-            eprintln!("Configuration error ({} profile): {}", args.profile, err);
-            std::process::exit(2);
-        }
-
-        if !quiet {
-            eprintln!("Connecting to MongoDB at {}...", config.sanitized_uri());
-        }
-
-        let sink = match MongoDbStorageSink::connect(config).await {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("Database error: {}", e);
-                std::process::exit(3);
+            // Fail fast if profile validation fails (exit code 2 per CLI contract)
+            if let Err(err) = config.validate_for_profile(args.profile) {
+                eprintln!("Configuration error ({} profile): {}", args.profile, err);
+                std::process::exit(2);
             }
-        };
 
-        if let Err(e) = sink.ensure_indexes().await {
-            eprintln!("Database index initialization error: {}", e);
-            std::process::exit(3);
-        }
-
-        Some(sink)
-    } else {
-        None
-    };
-
-    // If path is a directory, utilize the media directory walker and scan all files recursively
-    if args.path.is_dir() {
-        let scan_engine = ScanEngine::new();
-        let config = ScanConfig {
-            root_paths: vec![args.path.clone()],
-            batch_size: args.batch_size,
-            channel_capacity: args.channel_capacity,
-            skip_hidden: !args.include_hidden,
-            follow_symlinks: args.follow_symlinks,
-            ..Default::default()
-        };
-
-        let (session, mut stream) = scan_engine.start_scan(config).await?;
-        let root = args.path.clone();
-        let is_pretty = args.pretty.unwrap_or(false);
-
-        // Database write telemetry counters
-        let db_upserted = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-        let db_matched = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-        let db_modified = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-        let db_failed = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-
-        let db_upserted_telemetry = db_upserted.clone();
-        let db_matched_telemetry = db_matched.clone();
-        let db_failed_telemetry = db_failed.clone();
-        let has_mongo = mongo_sink.is_some();
-
-        // Live telemetry heartbeat on stderr
-        let telemetry_task = tokio::spawn(async move {
-            if quiet {
-                return;
+            if !quiet {
+                eprintln!("Connecting to MongoDB at {}...", config.sanitized_uri());
             }
-            let mut stderr = tokio::io::stderr();
-            while let Some(metric) = stream.telemetry.recv().await {
-                let line = if has_mongo {
-                    let total_ingested = db_upserted_telemetry
-                        .load(std::sync::atomic::Ordering::Relaxed)
-                        + db_matched_telemetry.load(std::sync::atomic::Ordering::Relaxed);
-                    format!(
-                        "\r[Scan & Ingest] Visited: {} | Found: {} | DB Ingested: {} | Rate: {:.1} fps | DB Errors: {}",
-                        metric.directories_scanned,
-                        metric.media_files_discovered,
-                        total_ingested,
-                        metric.items_per_sec,
-                        db_failed_telemetry.load(std::sync::atomic::Ordering::Relaxed),
-                    )
-                } else {
-                    format!(
-                        "\r[Scan & Extract] Visited: {} | Found: {} | Rate: {:.1} fps | Errors: {}",
-                        metric.directories_scanned,
-                        metric.media_files_discovered,
-                        metric.items_per_sec,
-                        metric.errors_encountered,
-                    )
-                };
-                let _ = stderr.write_all(line.as_bytes()).await;
-                let _ = stderr.flush().await;
-            }
-        });
 
-        // Error notifications on stderr
-        let error_task = tokio::spawn(async move {
-            let mut stderr = tokio::io::stderr();
-            while let Some(err) = stream.errors.recv().await {
-                let line = format!("[SKIP/ERROR] {:?} on {}\n", err.kind, err.path.display());
-                let _ = stderr.write_all(line.as_bytes()).await;
-            }
-        });
-
-        // Setup file/stdout writer if requested or when not writing solely to MongoDB
-        let mut writer_opt: Option<Box<dyn tokio::io::AsyncWrite + Unpin + Send>> =
-            match &args.output {
-                Some(out_path) => {
-                    let file = tokio::fs::File::create(out_path).await?;
-                    Some(Box::new(tokio::io::BufWriter::new(file)))
-                }
-                None => {
-                    if mongo_sink.is_none() {
-                        Some(Box::new(tokio::io::BufWriter::new(tokio::io::stdout())))
-                    } else {
-                        None
-                    }
+            let sink = match MongoDbStorageSink::connect(config).await {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("Database error: {}", e);
+                    std::process::exit(3);
                 }
             };
 
-        while let Some(batch) = stream.batches.recv().await {
-            let docs = engine.extract_batch(batch, Some(&root)).await;
-
-            // Ingest to MongoDB if configured
-            if let Some(ref sink) = mongo_sink {
-                match sink.save_batch(&docs).await {
-                    Ok(stats) => {
-                        db_upserted
-                            .fetch_add(stats.upserted_count, std::sync::atomic::Ordering::Relaxed);
-                        db_matched
-                            .fetch_add(stats.matched_count, std::sync::atomic::Ordering::Relaxed);
-                        db_modified
-                            .fetch_add(stats.modified_count, std::sync::atomic::Ordering::Relaxed);
-                    }
-                    Err(err) => {
-                        db_failed
-                            .fetch_add(docs.len() as u64, std::sync::atomic::Ordering::Relaxed);
-                        tracing::error!(error = %err, "Failed to persist batch to MongoDB");
-                    }
-                }
+            if let Err(e) = sink.ensure_indexes().await {
+                eprintln!("Database index initialization error: {}", e);
+                std::process::exit(3);
             }
 
-            // Write to file or stdout if enabled
-            if let Some(ref mut writer) = writer_opt {
-                for doc in &docs {
-                    if is_pretty {
-                        let pretty_json = serde_json::to_string_pretty(doc)?;
-                        writer
-                            .write_all(format!("{}\n", pretty_json).as_bytes())
-                            .await?;
-                    } else {
-                        let json = serde_json::to_string(doc)?;
-                        writer.write_all(format!("{}\n", json).as_bytes()).await?;
-                    }
-                }
-                writer.flush().await?;
+            Some(sink)
+        } else {
+            None
+        };
+
+    // If path is a directory, utilize the media directory walker and scan all files recursively
+    if args.path.is_dir() {
+        let scan_engine = std::sync::Arc::new(ScanEngine::new());
+        let metadata_engine = std::sync::Arc::new(engine);
+
+        let progress_sink: std::sync::Arc<dyn metadata_extractor::domain::ports::ProgressSink> =
+            std::sync::Arc::new(IndicatifTerminalProgress::new(
+                args.json_telemetry,
+                args.quiet,
+            ));
+
+        let has_mongo = mongo_sink.is_some();
+        let storage_sink_opt: Option<std::sync::Arc<dyn MetadataStorageSink>> =
+            mongo_sink.map(|s| std::sync::Arc::new(s) as std::sync::Arc<dyn MetadataStorageSink>);
+
+        let pipeline = ExtractionPipeline::new(
+            scan_engine,
+            metadata_engine,
+            profile,
+            storage_sink_opt,
+            progress_sink,
+        );
+
+        // Setup file/stdout writer (defaults to stdout if output file not specified)
+        let writer_opt: Option<
+            std::sync::Arc<tokio::sync::Mutex<Box<dyn tokio::io::AsyncWrite + Unpin + Send>>>,
+        > = match &args.output {
+            Some(out_path) => {
+                let file = tokio::fs::File::create(out_path).await?;
+                Some(std::sync::Arc::new(tokio::sync::Mutex::new(Box::new(
+                    tokio::io::BufWriter::new(file),
+                ))))
             }
+            None => Some(std::sync::Arc::new(tokio::sync::Mutex::new(Box::new(
+                tokio::io::BufWriter::new(tokio::io::stdout()),
+            )))),
+        };
+
+        // Cancellation signal handling (Ctrl+C / SIGINT)
+        let cancel_token = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let cancel_for_signal = cancel_token.clone();
+        tokio::spawn(async move {
+            if tokio::signal::ctrl_c().await.is_ok() {
+                cancel_for_signal.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        });
+
+        let is_pretty = args.pretty.unwrap_or(false);
+        let summary = pipeline
+            .execute(args.path.clone(), writer_opt, cancel_token, is_pretty)
+            .await?;
+
+        if has_mongo && !quiet {
+            eprintln!(
+                "Scan & Ingest completed for {}. Total: {}, DB Ingested: {} (Upserted: {}, Modified: {}, Matched: {}), Rate: {:.1} fps. Session: {}",
+                args.path.display(),
+                summary.total_processed,
+                summary.db_upserted + summary.db_matched,
+                summary.db_upserted,
+                summary.db_modified,
+                summary.db_matched,
+                summary.average_items_per_sec,
+                summary.session_id
+            );
         }
 
-        let _ = telemetry_task.await;
-        let _ = error_task.await;
-
-        if !quiet {
-            let metrics = engine.metrics(start_time);
-            if mongo_sink.is_some() {
-                let total_ingested = db_upserted.load(std::sync::atomic::Ordering::Relaxed)
-                    + db_matched.load(std::sync::atomic::Ordering::Relaxed);
-                eprintln!(
-                    "\rScan & Ingest completed for {}. Total: {}, DB Ingested: {} (Upserted: {}, Modified: {}, Matched: {}), Rate: {:.1} fps. Session: {}",
-                    root.display(),
-                    metrics.total_processed,
-                    total_ingested,
-                    db_upserted.load(std::sync::atomic::Ordering::Relaxed),
-                    db_modified.load(std::sync::atomic::Ordering::Relaxed),
-                    db_matched.load(std::sync::atomic::Ordering::Relaxed),
-                    metrics.throughput_fps,
-                    session.session_id
-                );
-            } else {
-                eprintln!(
-                    "\rScan & Extract completed for {}. Total: {}, Success: {}, Partial: {}, Failed: {}, Rate: {:.1} fps. Session: {}",
-                    root.display(),
-                    metrics.total_processed,
-                    metrics.success_count,
-                    metrics.partial_count,
-                    metrics.failed_count,
-                    metrics.throughput_fps,
-                    session.session_id
-                );
-            }
+        if summary.was_cancelled {
+            std::process::exit(130);
         }
 
         return Ok(());
@@ -690,7 +698,7 @@ async fn run_extract(args: ExtractArgs) -> Result<(), Box<dyn std::error::Error>
         file.write_all(format!("{}\n", output_str).as_bytes())
             .await?;
         file.flush().await?;
-    } else if args.mongodb_uri.is_none() {
+    } else {
         println!("{}", output_str);
     }
     Ok(())
@@ -747,6 +755,7 @@ async fn run_dedup(args: DedupArgs) -> Result<(), Box<dyn std::error::Error>> {
     let fp_config = FingerprintConfig {
         enable_perceptual,
         enable_rotation: !args.no_rotation,
+        ..Default::default()
     };
     let dedup_config = DeduplicationConfig {
         similarity_threshold: args.similarity_threshold,
@@ -896,6 +905,7 @@ async fn run_dedup_stream(args: DedupStreamArgs) -> Result<(), Box<dyn std::erro
     let fp_config = FingerprintConfig {
         enable_perceptual: !args.no_perceptual,
         enable_rotation: !args.no_rotation,
+        ..Default::default()
     };
     let dedup_config = DeduplicationConfig {
         similarity_threshold: args.similarity_threshold,

@@ -73,6 +73,7 @@ fn test_phash_thumbnail_scale_invariance() {
     let config = FingerprintConfig {
         enable_perceptual: true,
         enable_rotation: true,
+        ..Default::default()
     };
 
     let p_orig = fixture_path("photo_original.jpg");
@@ -106,6 +107,7 @@ fn test_phash_rotation_invariance() {
     let config = FingerprintConfig {
         enable_perceptual: true,
         enable_rotation: true,
+        ..Default::default()
     };
 
     let p_orig = fixture_path("photo_original.jpg");
@@ -152,6 +154,7 @@ fn test_phash_blank_images_marked_low_entropy() {
     let config = FingerprintConfig {
         enable_perceptual: true,
         enable_rotation: true,
+        ..Default::default()
     };
 
     let p_black = fixture_path("blank_black.jpg");
@@ -174,6 +177,7 @@ fn test_phash_distinct_images_high_distance() {
     let config = FingerprintConfig {
         enable_perceptual: true,
         enable_rotation: true,
+        ..Default::default()
     };
 
     let p_orig = fixture_path("photo_original.jpg");

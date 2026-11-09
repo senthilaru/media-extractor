@@ -3,6 +3,7 @@ pub mod errors;
 pub mod metadata_models;
 pub mod models;
 pub mod ports;
+pub mod progress_models;
 
 pub use dedup_models::{
     CanonicalAsset, DeduplicationConfig, DeduplicationSummary, DuplicateCluster,
@@ -20,5 +21,10 @@ pub use models::{
 };
 pub use ports::{
     BatchMetadataExtractor, DeduplicationEngine, DirectoryScanner, MediaClassifier,
-    MediaFingerprinter, MediaMetadataExtractor, MultiIndexLookup, ScanConfig, ScanStream,
+    MediaFingerprinter, MediaMetadataExtractor, MultiIndexLookup, ProgressReporter, ProgressSink,
+    ScanConfig, ScanStream,
+};
+pub use progress_models::{
+    ExecutionSummary, ExtractionMode, ExtractionPerformanceProfile, OperationalPhase,
+    ScanProgressSnapshot,
 };

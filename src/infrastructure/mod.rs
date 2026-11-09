@@ -7,5 +7,8 @@ pub mod multi_index;
 pub mod phash;
 pub mod raster_decoder;
 pub mod telemetry;
+pub mod terminal_progress;
 pub mod video_parser;
 pub mod walker;
+
+pub use terminal_progress::IndicatifTerminalProgress;

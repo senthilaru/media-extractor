@@ -46,7 +46,19 @@ impl MediaFingerprinter for Blake3MediaHasher {
         }
 
         let sample_digest = Some(self.compute_sample_digest(path)?);
-        let cryptographic_hash = self.compute_cryptographic_hash(path)?;
+
+        let should_hash = _config.enable_cryptographic_hash
+            && match _config.max_hash_size_bytes {
+                Some(limit) => file_size <= limit,
+                None => true,
+            };
+
+        let cryptographic_hash = if should_hash {
+            self.compute_cryptographic_hash(path)?
+        } else {
+            // For files exceeding threshold or with full hash disabled, use fast sample digest
+            sample_digest.clone().unwrap_or_default()
+        };
 
         let dimensions = metadata.and_then(|m| m.dimensions);
 
@@ -151,6 +163,14 @@ impl MediaFingerprinter for Blake3MediaHasher {
     }
 
     fn compute_cryptographic_hash(&self, path: &Path) -> Result<String, FingerprintError> {
+        let mut hasher = blake3::Hasher::new();
+
+        // Attempt memory-mapped multi-threaded hashing for maximum throughput
+        if hasher.update_mmap_rayon(path).is_ok() {
+            return Ok(hasher.finalize().to_hex().to_string());
+        }
+
+        // Fallback to buffered streaming if mmap fails (e.g. permission or special file)
         let file = File::open(path).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 FingerprintError::FileNotFound(path.to_path_buf())
@@ -163,7 +183,6 @@ impl MediaFingerprinter for Blake3MediaHasher {
         })?;
 
         let mut reader = BufReader::with_capacity(65536, file);
-        let mut hasher = blake3::Hasher::new();
         let mut buffer = [0u8; 65536];
 
         loop {
