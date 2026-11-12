@@ -99,6 +99,46 @@ pub enum DeduplicationError {
     #[error("Deduplication processing failed: {0}")]
     ProcessingFailed(String),
 
+    #[error("Drive configuration error: {0}")]
+    ConfigError(String),
+
+    #[error("Storage error during deduplication: {0}")]
+    Storage(#[from] StorageError),
+
+    #[error("Canonical master verification failed for '{path}': {reason}")]
+    MasterVerificationFailed { path: PathBuf, reason: String },
+
+    #[error("I/O error during file pruning for '{path}': {source}")]
+    PruneIoError {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("File transfer failed from '{source_path}' to '{target_path}': {reason}")]
+    TransferFailed {
+        source_path: PathBuf,
+        target_path: PathBuf,
+        reason: String,
+    },
+
+    #[error("Integrity verification mismatch for '{path}': expected {expected}, actual {actual}")]
+    IntegrityMismatch {
+        path: PathBuf,
+        expected: String,
+        actual: String,
+    },
+
+    #[error("Insufficient target space on '{drive}': required {required_bytes} bytes, available {available_bytes} bytes")]
+    InsufficientTargetSpace {
+        drive: String,
+        required_bytes: u64,
+        available_bytes: u64,
+    },
+
+    #[error("Drive '{drive}' is not mounted at '{path}'")]
+    DriveNotMounted { drive: String, path: PathBuf },
+
     #[error("Fingerprinting error: {0}")]
     Fingerprint(#[from] FingerprintError),
 }
@@ -127,6 +167,9 @@ pub enum StorageError {
 
     #[error("Failed to serialize document to BSON: {0}")]
     SerializationError(String),
+
+    #[error("Failed to deserialize document from BSON: {0}")]
+    DeserializationError(String),
 
     #[error("Configuration error: {0}")]
     ConfigurationError(String),

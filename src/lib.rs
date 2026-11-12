@@ -9,11 +9,17 @@ pub mod infrastructure;
 
 // Convenience re-exports
 pub use application::{
-    ExtractionPipeline, MediaDeduplicationEngine, MetadataExtractionEngine, ProgressTracker,
+    DrivePruningService, ExtractionPipeline, MasterIngestService, MediaDeduplicationEngine,
+    MetadataExtractionEngine, ProgressTracker, ReplicaSyncOptions, ReplicaSyncService,
+    UnifiedFileTransferService,
 };
 pub use domain::dedup_models::{
-    CanonicalAsset, DeduplicationConfig, DeduplicationSummary, DuplicateCluster,
-    DuplicateRelationship, DuplicateVariant, FingerprintConfig, MediaFingerprint, RotatedHashes,
+    CanonicalAsset, CanonicalPathStatus, DeduplicationConfig, DeduplicationMetadata,
+    DeduplicationStatus, DeduplicationSummary, DriveConfiguration, DriveDefinition, DriveGroupSpec,
+    DriveRemovalManifest, DriveRemovalTask, DriveRules, DuplicateCluster, DuplicateRelationship,
+    DuplicateVariant, FingerprintConfig, IngestExecutionReport, IngestOptions, IngestTask,
+    IngestTaskStatus, MasterIngestPlan, MediaFingerprint, PathResolution, ReplicaSyncPlan,
+    ReplicaSyncReport, ReplicaSyncTask, RotatedHashes,
 };
 pub use domain::errors::{
     DeduplicationError, ExtractionError, FingerprintError, ScanError, ScanErrorKind, StorageError,
@@ -36,6 +42,7 @@ pub use domain::progress_models::{
     ExecutionSummary, ExtractionMode, ExtractionPerformanceProfile, OperationalPhase,
     ScanProgressSnapshot,
 };
+pub use infrastructure::drives_config::{CanonicalPathMatcher, DrivesConfigLoader};
 pub use infrastructure::mongodb_sink::MongoDbStorageSink;
 pub use infrastructure::multi_index::MultiIndexLookupTable;
 pub use infrastructure::terminal_progress::IndicatifTerminalProgress;

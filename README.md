@@ -31,11 +31,38 @@ Re-connect Drives 1-by-1 <────────── Reclaim Terabytes of Di
    - Run `metadata-extractor /Volumes/Drive-X` for each drive, pointing to a shared MongoDB database.
    - The scanner extracts camera EXIF, video atoms, capture dates, and content fingerprints into a single centralized database.
    - If you ever re-scan a drive, **incremental change caching** automatically recognizes previously indexed files and skips them in seconds with zero extra disk I/O.
-2. **Step 2: Identify & Mark Duplicates Across All Disks**
-   - With all drives indexed in one database, run global duplicate queries or the multi-tier deduplication engine.
-   - The engine identifies exact bitwise copies (via streaming BLAKE3) and resized photo variants (via 64-bit DCT perceptual hashes), automatically designating the highest-quality primary master.
+2. **Step 2: Identify & Mark Duplicates in MongoDB**
+   - With your drives indexed in MongoDB, configure your drive roles (primary master vs replicas) in `drives.yaml` or `.env`.
+   - Preview the duplicate classification without altering data:
+     ```bash
+     ./target/release/metadata-extractor dedup -c drives.yaml --dry-run
+     ```
+   - Mark duplicates directly in MongoDB:
+     ```bash
+     ./target/release/metadata-extractor dedup -c drives.yaml
+     ```
+   - This writes a `dedup` status directly onto each asset record in MongoDB (`CanonicalMaster`, `ReplicaKeep`, `MarkForRemoval`, `NeedsIngestToMaster`).
+   - Query marked duplicates instantly in MongoDB (`mongosh`):
+     ```javascript
+     // Find all files marked for removal across all drives
+     db.media_assets.find({ "dedup.status": "MarkForRemoval" }, { "file_context.file_path": 1, "dedup.canonical_master_path": 1 });
+     ```
 3. **Step 3: Deduplicate and Consolidate Cleanly**
-   - Connect the hard drives back one by one to verify, consolidate, or prune marked duplicates safely, freeing up massive amounts of storage on your home media server.
+   - Connect your external hard drives back one by one to prune marked duplicates, ingest missing files, or synchronize replicas:
+     ```bash
+     # Ingest unmastered files from any external drive or local folder into the primary master structure:
+     # (--source-drive accepts any external drive mount path, local directory, or drive ID; no preconfiguration required)
+     ./target/release/metadata-extractor ingest --source-drive /Volumes/USB_STICK -c drives.yaml
+
+     # Ingest AND automatically fan out new canonical masters to all mounted replica drives:
+     ./target/release/metadata-extractor ingest --source-drive /Volumes/USB_STICK --replicate -c drives.yaml
+
+     # Mirror all canonical masters from primary master to all connected replica backup drives:
+     ./target/release/metadata-extractor sync-replicas -c drives.yaml
+
+     # Prune marked duplicates on a secondary drive to reclaim disk space:
+     ./target/release/metadata-extractor dedup prune --drive wd_backup -c drives.yaml --execute
+     ```
 
 > 💡 **Looking for API schemas, duplicate detection algorithms, subcommands, or MongoDB query recipes?**  
 > See [apis.md](apis.md) for the complete API and architecture reference.
@@ -179,7 +206,7 @@ Status:              Completed successfully
 | `--profile` | — | `APP_PROFILE` | `local` | Operational profile (`local` for development, `production` for strict security checks). |
 | `--batch-size` | `-b` | `SCAN_BATCH_SIZE` | `500` | Discovery batch chunk size when scanning directory. |
 | `--channel-capacity` | `-c` | `BACKPRESSURE_CAPACITY` | `100` | Maximum batches buffered in channel before backpressure activates. |
-| `--include-hidden` | — | — | `false` | Include hidden files and directories (prefixed with `.`). |
+| `--include-hidden` | — | — | `true` | Include hidden files and directories (prefixed with `.`). |
 | `--follow-symlinks` | — | — | `false` | Follow directory symlinks with cycle detection. |
 | `--quiet` | `-q` | — | `false` | Suppress live scan telemetry on `stderr`. |
 | `--json-telemetry` | — | `MEDIA_JSON_TELEMETRY` | `false` | Emit progress telemetry as discrete JSON lines instead of ANSI progress bar. |
@@ -207,6 +234,13 @@ APP_PROFILE=local
 MONGODB_URI=mongodb://media_app:<MONGODB_PASSWORD>@localhost:27017/media_index_db?authSource=media_index_db
 MONGODB_PASSWORD=your_secure_password
 MONGODB_COLLECTION=media_assets
+
+# (Optional) Direct Media Drives Configuration for Deduplication & Master Ingest
+# Copy drives.example.yaml to drives.yaml OR define drive mount paths directly here:
+DRIVE_PRIMARY_MOUNT=/Volumes/SP-1
+DRIVE_PRIMARY_MASTER=/Volumes/SP-1/SPSA/media/master
+DRIVE_REPLICA1_MOUNT=/Volumes/SP-2
+DRIVE_REPLICA1_MASTER=/Volumes/SP-2/SPSA/media/master
 ```
 
 When `.env` is present, you can simply run:

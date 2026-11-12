@@ -21,7 +21,7 @@ metadata-extractor [OPTIONS] <PATH>
 - `-q, --quiet`: Mute real-time scan telemetry and progress heartbeats on `stderr`.
 - `-b, --batch-size <NUM>`: Number of discovered media items per channel batch (default: `500`).
 - `-c, --channel-capacity <NUM>`: Maximum batches buffered before applying backpressure (default: `100`).
-- `--include-hidden`: Include hidden files and directories starting with `.` (default: `false`).
+- `--include-hidden`: Include hidden files and directories starting with `.` (default: `true`).
 - `--follow-symlinks`: Follow directory symlinks with loop detection (default: `false`).
 
 ---

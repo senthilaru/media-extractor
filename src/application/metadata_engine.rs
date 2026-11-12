@@ -146,6 +146,7 @@ impl MetadataExtractionEngine {
                 warnings: Vec::new(),
                 error_message: Some(err.to_string()),
             },
+            dedup: None,
         }
     }
 }

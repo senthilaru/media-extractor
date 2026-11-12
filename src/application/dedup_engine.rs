@@ -1,14 +1,18 @@
+use chrono::Utc;
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 use uuid::Uuid;
 
 use crate::domain::dedup_models::{
-    CanonicalAsset, DeduplicationConfig, DeduplicationSummary, DuplicateCluster,
-    DuplicateRelationship, DuplicateVariant, MediaFingerprint,
+    CanonicalAsset, DeduplicationConfig, DeduplicationMetadata, DeduplicationStatus,
+    DeduplicationSummary, DriveConfiguration, DuplicateCluster, DuplicateRelationship,
+    DuplicateVariant, MediaFingerprint,
 };
 use crate::domain::errors::DeduplicationError;
+use crate::domain::metadata_models::MediaMetadataDocument;
 use crate::domain::models::MediaCategory;
-use crate::domain::ports::{DeduplicationEngine, MultiIndexLookup};
+use crate::domain::ports::{DeduplicationEngine, MetadataStorageSink, MultiIndexLookup};
+use crate::infrastructure::drives_config::CanonicalPathMatcher;
 use crate::infrastructure::multi_index::MultiIndexLookupTable;
 
 /// Disjoint Set Union (Union-Find) for grouping candidate duplicate items.
@@ -302,6 +306,304 @@ impl MediaDeduplicationEngine {
         }
 
         clusters
+    }
+
+    /// Evaluates any content group (single unique asset or multi-document duplicate cluster)
+    /// against drive hierarchies and assigns appropriate DeduplicationStatus.
+    pub fn evaluate_content_group(
+        docs: &[MediaMetadataDocument],
+        matcher: &CanonicalPathMatcher,
+    ) -> Vec<(Uuid, DeduplicationMetadata)> {
+        if docs.is_empty() {
+            return Vec::new();
+        }
+
+        let cluster_id = Uuid::new_v4();
+        let evaluated_at = Utc::now();
+
+        // 1. Analyze each document's path and drive context
+        struct DocContext<'a> {
+            doc: &'a MediaMetadataDocument,
+            drive_id: Option<String>,
+            drive_group: Option<String>,
+            is_in_master: bool,
+            group_priority: u32,
+        }
+
+        let contexts: Vec<DocContext> = docs
+            .iter()
+            .map(|doc| {
+                let drive_def = matcher.find_drive_for_path(&doc.file_context.file_path);
+                let is_in_master = matcher.is_in_canonical_master(&doc.file_context.file_path);
+                let (drive_id, drive_group, group_priority) = match drive_def {
+                    Some(drive) => (
+                        Some(drive.id.clone()),
+                        Some(drive.group.clone()),
+                        matcher.group_priority(&drive.group),
+                    ),
+                    None => (None, None, 0),
+                };
+
+                DocContext {
+                    doc,
+                    drive_id,
+                    drive_group,
+                    is_in_master,
+                    group_priority,
+                }
+            })
+            .collect();
+
+        // 2. Identify primary master candidates (assets located in primary drive's canonical master path)
+        let primary_master_candidates: Vec<&DocContext> = contexts
+            .iter()
+            .filter(|c| matcher.is_primary_master(&c.doc.file_context.file_path))
+            .collect();
+
+        // If there are multiple copies in the primary canonical master path: ConflictReview
+        if primary_master_candidates.len() > 1 {
+            return contexts
+                .iter()
+                .map(|c| {
+                    (
+                        c.doc.id,
+                        DeduplicationMetadata {
+                            cluster_id,
+                            status: DeduplicationStatus::ConflictReview,
+                            canonical_master_id: None,
+                            canonical_master_path: None,
+                            drive_id: c.drive_id.clone(),
+                            drive_group: c.drive_group.clone(),
+                            is_in_master_path: c.is_in_master,
+                            reclaimable_bytes: 0,
+                            evaluated_at,
+                        },
+                    )
+                })
+                .collect();
+        }
+
+        // Case A: Exactly one copy exists in the Primary Master path -> CanonicalMaster!
+        if primary_master_candidates.len() == 1 {
+            let canonical_master_ctx = primary_master_candidates[0];
+            let canonical_master_id = canonical_master_ctx.doc.id;
+            let canonical_master_path = canonical_master_ctx.doc.file_context.file_path.clone();
+
+            return contexts
+                .iter()
+                .map(|c| {
+                    let status = if c.doc.id == canonical_master_id {
+                        DeduplicationStatus::CanonicalMaster
+                    } else if c.is_in_master {
+                        DeduplicationStatus::ReplicaKeep
+                    } else {
+                        DeduplicationStatus::MarkForRemoval
+                    };
+
+                    let reclaimable_bytes = if status == DeduplicationStatus::MarkForRemoval {
+                        c.doc.file_context.file_size_bytes
+                    } else {
+                        0
+                    };
+
+                    (
+                        c.doc.id,
+                        DeduplicationMetadata {
+                            cluster_id,
+                            status,
+                            canonical_master_id: Some(canonical_master_id),
+                            canonical_master_path: Some(canonical_master_path.clone()),
+                            drive_id: c.drive_id.clone(),
+                            drive_group: c.drive_group.clone(),
+                            is_in_master_path: c.is_in_master,
+                            reclaimable_bytes,
+                            evaluated_at,
+                        },
+                    )
+                })
+                .collect();
+        }
+
+        // Case B: Zero copies exist in the Primary Master path.
+        // We select the single best candidate to be ingested to master:
+        // Rank by:
+        // 1. Group priority descending (e.g. replica drive > staging drive > unknown)
+        // 2. is_in_master (true before false - e.g. replica master path)
+        // 3. Earliest or deterministic doc ID
+        let mut sorted_contexts: Vec<&DocContext> = contexts.iter().collect();
+        sorted_contexts.sort_by(|a, b| {
+            b.group_priority
+                .cmp(&a.group_priority)
+                .then_with(|| b.is_in_master.cmp(&a.is_in_master))
+                .then_with(|| a.doc.id.cmp(&b.doc.id))
+        });
+
+        let best_candidate_ctx = sorted_contexts[0];
+        let best_candidate_id = best_candidate_ctx.doc.id;
+
+        contexts
+            .iter()
+            .map(|c| {
+                let status = if c.doc.id == best_candidate_id {
+                    DeduplicationStatus::NeedsIngestToMaster
+                } else {
+                    DeduplicationStatus::MarkForRemoval
+                };
+
+                let reclaimable_bytes = if status == DeduplicationStatus::MarkForRemoval {
+                    c.doc.file_context.file_size_bytes
+                } else {
+                    0
+                };
+
+                (
+                    c.doc.id,
+                    DeduplicationMetadata {
+                        cluster_id,
+                        status,
+                        canonical_master_id: None,
+                        canonical_master_path: None,
+                        drive_id: c.drive_id.clone(),
+                        drive_group: c.drive_group.clone(),
+                        is_in_master_path: c.is_in_master,
+                        reclaimable_bytes,
+                        evaluated_at,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    /// Evaluates a cluster of duplicate media documents across drive hierarchies according to
+    /// canonical master path rules (delegates to evaluate_content_group).
+    pub fn evaluate_replica_cluster(
+        docs: &[MediaMetadataDocument],
+        matcher: &CanonicalPathMatcher,
+    ) -> Vec<(Uuid, DeduplicationMetadata)> {
+        Self::evaluate_content_group(docs, matcher)
+    }
+
+    /// Runs universal classification over all assets in the catalog (both unique and duplicates).
+    pub async fn run_universal_classification(
+        &self,
+        sink: &dyn MetadataStorageSink,
+        config: &DriveConfiguration,
+        dry_run: bool,
+    ) -> Result<DeduplicationSummary, DeduplicationError> {
+        let start = Instant::now();
+        let matcher = CanonicalPathMatcher::new(config.clone());
+
+        // Step 1: Query all content groups (both unique count == 1 and duplicates count > 1)
+        let content_groups = sink.query_all_content_groups(None).await?;
+
+        let mut total_files_scanned = 0usize;
+        let mut unique_media_count = 0usize;
+        let mut duplicate_clusters_count = 0usize;
+        let mut exact_duplicate_files = 0usize;
+        let mut total_reclaimable_bytes = 0u64;
+
+        let mut all_updates = Vec::new();
+
+        for (_hash, docs) in &content_groups {
+            total_files_scanned += docs.len();
+            if docs.len() == 1 {
+                unique_media_count += 1;
+            } else {
+                duplicate_clusters_count += 1;
+                exact_duplicate_files += docs.len().saturating_sub(1);
+            }
+
+            let evaluations = Self::evaluate_content_group(docs, &matcher);
+            for (id, meta) in evaluations {
+                total_reclaimable_bytes += meta.reclaimable_bytes;
+                all_updates.push((id, meta));
+            }
+        }
+
+        if !dry_run && !all_updates.is_empty() {
+            for chunk in all_updates.chunks(500) {
+                sink.update_dedup_batch(chunk).await?;
+            }
+        }
+
+        Ok(DeduplicationSummary {
+            total_files_scanned,
+            unique_media_count,
+            duplicate_clusters_count,
+            exact_duplicate_files,
+            near_duplicate_files: 0,
+            total_reclaimable_bytes,
+            tier_pruned_percentage: 0.0,
+            elapsed_seconds: start.elapsed().as_secs_f64(),
+        })
+    }
+
+    /// Orchestrates database-driven deduplication:
+    /// 1. Queries MongoDB for all duplicate cryptographic hash groups.
+    /// 2. Evaluates each cluster using `evaluate_replica_cluster` with `CanonicalPathMatcher`.
+    /// 3. If `dry_run` is false, persists `DeduplicationMetadata` updates to MongoDB in bulk.
+    /// 4. Aggregates and returns `DeduplicationSummary`.
+    pub async fn run_database_dedup(
+        &self,
+        sink: &dyn MetadataStorageSink,
+        config: &DriveConfiguration,
+        dry_run: bool,
+    ) -> Result<DeduplicationSummary, DeduplicationError> {
+        let start = Instant::now();
+        let matcher = CanonicalPathMatcher::new(config.clone());
+
+        // Step 1: Query all duplicate cryptographic groups from MongoDB
+        let duplicate_groups = sink.query_duplicate_groups().await?;
+
+        let mut all_updates: Vec<(Uuid, DeduplicationMetadata)> = Vec::new();
+        let mut total_files_scanned = 0usize;
+        let mut exact_duplicate_files = 0usize;
+        let mut total_reclaimable_bytes = 0u64;
+        let mut unique_masters_count = 0usize;
+
+        // Step 2: Evaluate replica hierarchy for each group
+        for (_hash, docs) in &duplicate_groups {
+            total_files_scanned += docs.len();
+            let updates = Self::evaluate_replica_cluster(docs, &matcher);
+
+            for (id, meta) in updates {
+                match meta.status {
+                    DeduplicationStatus::MarkForRemoval => {
+                        exact_duplicate_files += 1;
+                        total_reclaimable_bytes += meta.reclaimable_bytes;
+                    }
+                    DeduplicationStatus::CanonicalMaster
+                    | DeduplicationStatus::ReplicaKeep
+                    | DeduplicationStatus::NeedsIngestToMaster => {
+                        unique_masters_count += 1;
+                    }
+                    _ => {}
+                }
+                all_updates.push((id, meta));
+            }
+        }
+
+        // Step 3: Persist updates if not in dry-run mode
+        if !dry_run && !all_updates.is_empty() {
+            sink.update_dedup_batch(&all_updates).await?;
+        }
+
+        let summary = DeduplicationSummary {
+            total_files_scanned,
+            unique_media_count: unique_masters_count,
+            duplicate_clusters_count: duplicate_groups.len(),
+            exact_duplicate_files,
+            near_duplicate_files: 0,
+            total_reclaimable_bytes,
+            tier_pruned_percentage: if total_files_scanned > 0 {
+                (exact_duplicate_files as f64 / total_files_scanned as f64) * 100.0
+            } else {
+                0.0
+            },
+            elapsed_seconds: start.elapsed().as_secs_f64(),
+        };
+
+        Ok(summary)
     }
 }
 

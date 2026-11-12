@@ -16,6 +16,8 @@ release/
 *.log
 .env*
 !.env.example
+drives.yaml
+!drives.example.yaml
 
 # macOS / OS artifacts
 .DS_Store

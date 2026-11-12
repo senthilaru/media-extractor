@@ -40,7 +40,7 @@ impl Default for ScanConfig {
             root_paths: Vec::new(),
             batch_size: 500,
             channel_capacity: 100,
-            skip_hidden: true,
+            skip_hidden: false,
             follow_symlinks: false,
             telemetry_interval: Duration::from_millis(1000),
         }

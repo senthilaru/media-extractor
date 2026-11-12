@@ -27,3 +27,9 @@ mod mongodb_config_tests;
 
 #[path = "unit/profile_config_tests.rs"]
 mod profile_config_tests;
+
+#[path = "unit/drives_config_tests.rs"]
+mod drives_config_tests;
+
+#[path = "unit/transfer_service_tests.rs"]
+mod transfer_service_tests;

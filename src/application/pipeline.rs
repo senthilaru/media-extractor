@@ -63,7 +63,7 @@ impl ExtractionPipeline {
             root_paths: vec![target_path.clone()],
             batch_size: self.profile.batch_size,
             channel_capacity: self.profile.channel_capacity,
-            skip_hidden: true,
+            skip_hidden: false,
             follow_symlinks: false,
             telemetry_interval: Duration::from_millis(self.profile.update_interval_ms),
         };

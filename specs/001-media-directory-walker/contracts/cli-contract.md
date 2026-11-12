@@ -20,7 +20,7 @@ metadata-extractor scan [OPTIONS] <PATHS>...
 ### Options
 - `-b, --batch-size <NUM>`: Number of discovered media items per emitted batch (default: `500`).
 - `-c, --channel-capacity <NUM>`: Maximum batches buffered before applying backpressure (default: `100`).
-- `--include-hidden`: Do not ignore hidden directories and files (starting with `.`).
+- `--include-hidden`: Do not ignore hidden directories and files (starting with `.`) (default: `true`).
 - `--follow-symlinks`: Follow symbolic links to directories (guarded by cycle detection).
 - `--format <text|json>`: Output format (default: `text`).
 - `-q, --quiet`: Suppress live telemetry heartbeats on stderr.

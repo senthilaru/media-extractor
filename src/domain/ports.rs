@@ -3,8 +3,8 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 
 use crate::domain::dedup_models::{
-    DeduplicationConfig, DeduplicationSummary, DuplicateCluster, FingerprintConfig,
-    MediaFingerprint,
+    DeduplicationConfig, DeduplicationMetadata, DeduplicationSummary, DuplicateCluster,
+    FingerprintConfig, MediaFingerprint,
 };
 use crate::domain::errors::{
     DeduplicationError, ExtractionError, FingerprintError, ScanError, StorageError,
@@ -25,7 +25,7 @@ pub struct ScanConfig {
     pub batch_size: usize,
     /// Bounded capacity for the batch channel (default: 100 batches).
     pub channel_capacity: usize,
-    /// Whether to skip hidden files and directories (default: true).
+    /// Whether to skip hidden files and directories (default: false).
     pub skip_hidden: bool,
     /// Whether to follow directory symlinks (default: false).
     pub follow_symlinks: bool,
@@ -39,7 +39,7 @@ impl Default for ScanConfig {
             root_paths: Vec::new(),
             batch_size: 500,
             channel_capacity: 100,
-            skip_hidden: true,
+            skip_hidden: false,
             follow_symlinks: false,
             telemetry_interval: Duration::from_millis(1000),
         }
@@ -175,6 +175,67 @@ pub trait MetadataStorageSink: Send + Sync {
         &self,
         items: &[DiscoveredMediaItem],
     ) -> Result<FilterEvaluationResult, StorageError>;
+
+    /// Queries all duplicate content groups having duplicate hashes across the database.
+    async fn query_duplicate_groups(
+        &self,
+    ) -> Result<Vec<(String, Vec<MediaMetadataDocument>)>, StorageError>;
+
+    /// Bulk updates deduplication metadata for evaluated records.
+    async fn update_dedup_batch(
+        &self,
+        updates: &[(uuid::Uuid, DeduplicationMetadata)],
+    ) -> Result<usize, StorageError>;
+
+    /// Queries documents marked for removal, optionally filtered by a drive mount path prefix.
+    async fn query_removal_candidates(
+        &self,
+        mount_prefix: Option<&str>,
+    ) -> Result<Vec<MediaMetadataDocument>, StorageError>;
+
+    /// Queries unmastered documents marked with NeedsIngestToMaster, optionally filtered by a drive mount path prefix.
+    async fn query_unmastered_candidates(
+        &self,
+        mount_prefix: Option<&str>,
+    ) -> Result<Vec<MediaMetadataDocument>, StorageError>;
+
+    /// Verifies that a canonical master document exists and returns its current record.
+    async fn find_document_by_id(
+        &self,
+        doc_id: uuid::Uuid,
+    ) -> Result<Option<MediaMetadataDocument>, StorageError>;
+
+    /// Marks a document as physically removed.
+    async fn mark_removed(&self, doc_id: uuid::Uuid) -> Result<(), StorageError>;
+
+    /// Queries all content groups grouped by cryptographic hash across the database,
+    /// including unique assets (count == 1) and duplicate clusters (count > 1).
+    async fn query_all_content_groups(
+        &self,
+        mount_prefix: Option<&str>,
+    ) -> Result<Vec<(String, Vec<MediaMetadataDocument>)>, StorageError>;
+
+    /// Queries all authoritative canonical master documents currently stored in the database.
+    async fn query_canonical_masters(&self) -> Result<Vec<MediaMetadataDocument>, StorageError>;
+
+    /// Queries replica documents associated with a specific replica drive ID.
+    async fn query_replica_documents(
+        &self,
+        replica_drive_id: &str,
+    ) -> Result<Vec<MediaMetadataDocument>, StorageError>;
+
+    /// Counts documents in the collection that are missing cryptographic content fingerprints.
+    async fn count_unfingerprinted_records(&self) -> Result<u64, StorageError> {
+        Ok(0)
+    }
+
+    /// Bulk updates all non-canonical duplicate records sharing the given cryptographic hashes to link to their canonical master ID and path.
+    async fn link_canonical_masters(
+        &self,
+        _links: &[(String, uuid::Uuid, std::path::PathBuf)],
+    ) -> Result<usize, StorageError> {
+        Ok(0)
+    }
 }
 
 /// Port for reporting live progress updates and phase transitions.

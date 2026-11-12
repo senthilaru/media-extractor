@@ -97,6 +97,7 @@ async fn test_mongodb_filter_unmodified_items_live() {
             video: None,
             fingerprint: None,
             extraction_status: ExtractionStatus::default(),
+            dedup: None,
         },
         MediaMetadataDocument {
             id: Uuid::new_v4(),
@@ -121,6 +122,7 @@ async fn test_mongodb_filter_unmodified_items_live() {
             video: None,
             fingerprint: None,
             extraction_status: ExtractionStatus::default(),
+            dedup: None,
         },
         MediaMetadataDocument {
             id: Uuid::new_v4(),
@@ -145,6 +147,7 @@ async fn test_mongodb_filter_unmodified_items_live() {
             video: None,
             fingerprint: None,
             extraction_status: ExtractionStatus::default(),
+            dedup: None,
         },
     ];
 

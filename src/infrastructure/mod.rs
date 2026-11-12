@@ -1,6 +1,7 @@
 pub mod blake3_hasher;
 pub mod classifier;
 pub mod cycle_detector;
+pub mod drives_config;
 pub mod exif_parser;
 pub mod mongodb_sink;
 pub mod multi_index;

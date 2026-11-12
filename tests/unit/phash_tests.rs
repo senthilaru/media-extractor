@@ -25,6 +25,35 @@ fn discovered_item(path: PathBuf) -> DiscoveredMediaItem {
 }
 
 #[test]
+fn test_phash_deserialize_negative_bson_i64() {
+    // -5690595411479605651 as i64 corresponds to 12756148662229945965 as u64
+    let json_str = r#"{
+        "id": "99312b10-0a12-4f3b-9a4c-88201a43b2cf",
+        "file_path": "/test/photo.jpg",
+        "file_size_bytes": 1024,
+        "media_category": "Photo",
+        "cryptographic_hash": "c6f605e3b571f6ddcdbfaad3978234193f60c68acc384595face0de869d3e67f",
+        "phash": -5690595411479605651,
+        "rotated_hashes": {
+            "hash_90": -1,
+            "hash_180": -5690595411479605651,
+            "hash_270": 42
+        },
+        "is_low_entropy": false,
+        "fingerprinted_at": "2026-11-10T23:00:00Z"
+    }"#;
+
+    let fp: metadata_extractor::domain::dedup_models::MediaFingerprint =
+        serde_json::from_str(json_str).expect("Should deserialize negative signed BSON integers");
+
+    assert_eq!(fp.perceptual_hash, Some(12756148662229945965_u64));
+    let rot = fp.rotated_hashes.unwrap();
+    assert_eq!(rot.hash_90, u64::MAX);
+    assert_eq!(rot.hash_180, 12756148662229945965_u64);
+    assert_eq!(rot.hash_270, 42_u64);
+}
+
+#[test]
 fn test_hamming_distance() {
     assert_eq!(DctPerceptualHasher::hamming_distance(0, 0), 0);
     assert_eq!(DctPerceptualHasher::hamming_distance(0, u64::MAX), 64);

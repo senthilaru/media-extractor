@@ -422,6 +422,7 @@ impl MediaMetadataExtractor for ExifMetadataExtractor {
                 warnings,
                 error_message: None,
             },
+            dedup: None,
         })
     }
 }

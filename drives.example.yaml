@@ -1,0 +1,49 @@
+# ==============================================================================
+# Sample Drive Configuration Template for Media Metadata Extractor
+# ==============================================================================
+# This file defines the storage hierarchy for duplicate identification,
+# replica verification, and automated master ingestion.
+#
+# You can copy this file to `drives.yaml` or define mount paths in `.env`.
+# Environment variable placeholders like `${VAR:-default}` are supported!
+# ==============================================================================
+
+version: "1.0"
+
+# Retention priority groups (higher number = higher priority to retain)
+groups:
+  primary:
+    priority: 100
+    description: "Primary master drive group - single source of truth"
+  replica1:
+    priority: 80
+    description: "First backup replica group (mirror of primary)"
+  replica2:
+    priority: 70
+    description: "Second backup replica group"
+  staging:
+    priority: 20
+    description: "Temporary external drive or USB stick for ingestion"
+
+# Configured drive instances
+# Note: You can reference environment variables with ${VAR:-default} fallback syntax
+drives:
+  - id: "primary_main"
+    group: "primary"
+    mount_path: "${DRIVE_PRIMARY_MOUNT:-/Volumes/DummyPrimary-1}"
+    master_path: "${DRIVE_PRIMARY_MASTER:-/Volumes/DummyPrimary-1/SPSA/media/master}"
+
+  - id: "replica_1"
+    group: "replica1"
+    mount_path: "${DRIVE_REPLICA1_MOUNT:-/Volumes/DummyReplica-1}"
+    master_path: "${DRIVE_REPLICA1_MASTER:-/Volumes/DummyReplica-1/SPSA/media/master}"
+
+  - id: "replica_2"
+    group: "replica2"
+    mount_path: "${DRIVE_REPLICA2_MOUNT:-/Volumes/DummyReplica-2}"
+    master_path: "${DRIVE_REPLICA2_MASTER:-/Volumes/DummyReplica-2/SPSA/media/master}"
+
+  - id: "staging_drive"
+    group: "staging"
+    mount_path: "${DRIVE_STAGING_MOUNT:-/Volumes/DummyStaging}"
+    master_path: "${DRIVE_STAGING_MASTER:-/Volumes/DummyStaging/SPSA/media/master}"

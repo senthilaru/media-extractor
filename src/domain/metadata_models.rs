@@ -47,6 +47,10 @@ pub struct MediaMetadataDocument {
 
     /// Operational status and diagnostic warnings/errors
     pub extraction_status: ExtractionStatus,
+
+    /// Evaluated deduplication and replica status
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dedup: Option<crate::domain::dedup_models::DeduplicationMetadata>,
 }
 
 /// Filesystem and spatial path context relative to the scan root.

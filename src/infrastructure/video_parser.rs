@@ -507,6 +507,7 @@ impl MediaMetadataExtractor for VideoMetadataExtractor {
                 warnings,
                 error_message: None,
             },
+            dedup: None,
         })
     }
 }
