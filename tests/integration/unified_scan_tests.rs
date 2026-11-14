@@ -267,6 +267,7 @@ fn test_unified_scan_low_entropy_and_nested_directories() {
     let output = Command::new(BIN_PATH)
         .arg(root)
         .arg("-q")
+        .env("MONGODB_URI", "")
         .output()
         .expect("Failed to execute recursive scan on nested tree");
 

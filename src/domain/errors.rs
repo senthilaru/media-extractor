@@ -136,6 +136,13 @@ pub enum DeduplicationError {
         available_bytes: u64,
     },
 
+    #[error("Pruning is strictly forbidden on protected archive storage '{drive}' at '{path}': {reason}")]
+    PruneForbiddenOnProtectedArchive {
+        drive: String,
+        path: PathBuf,
+        reason: String,
+    },
+
     #[error("Drive '{drive}' is not mounted at '{path}'")]
     DriveNotMounted { drive: String, path: PathBuf },
 

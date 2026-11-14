@@ -62,7 +62,7 @@ impl IndicatifTerminalProgress {
         let bar = if is_tty {
             let pb = ProgressBar::with_draw_target(None, ProgressDrawTarget::stderr());
             let style = ProgressStyle::default_bar()
-                .template("{prefix:.bold} {spinner:.green} [{bar:25.cyan/blue}] {percent}% | {pos}/{len} items ({msg}) | {per_sec} | {bytes_per_sec} | Elapsed: {elapsed} | ETA: {eta}")
+                .template("{prefix:.bold} {spinner:.green} [{bar:25.cyan/blue}] {percent}% | {pos}/{len} items ({msg})")
                 .unwrap_or_else(|_| ProgressStyle::default_bar())
                 .progress_chars("=> ");
             pb.set_style(style);
@@ -129,12 +129,6 @@ impl ProgressSink for IndicatifTerminalProgress {
                     pb.set_position(completed_items);
                 }
 
-                let percent = if snapshot.items_discovered > 0 {
-                    (completed_items as f64 / snapshot.items_discovered as f64 * 100.0).min(100.0)
-                } else {
-                    0.0
-                };
-
                 let eta_str = match snapshot.estimated_remaining {
                     Some(rem) => format_duration(rem),
                     None => "--".to_string(),
@@ -152,10 +146,8 @@ impl ProgressSink for IndicatifTerminalProgress {
 
                 let status_msg = if snapshot.items_skipped > 0 {
                     format!(
-                        "{:.0}% | {}/{} items (Skipped: {} | Extracted: {}) | {:.1} items/s | {:.1} MB/s | Elapsed: {} | ETA: {}",
-                        percent,
-                        completed_items,
-                        snapshot.items_discovered,
+                        "{} | Skipped: {} | Extracted: {} | {:.1} items/s | {:.1} MB/s | Elapsed: {} | ETA: {}",
+                        vol_str,
                         snapshot.items_skipped,
                         snapshot.items_processed,
                         snapshot.items_per_sec,
@@ -165,10 +157,7 @@ impl ProgressSink for IndicatifTerminalProgress {
                     )
                 } else {
                     format!(
-                        "{:.0}% | {}/{} items ({}) | {:.1} items/s | {:.1} MB/s | Elapsed: {} | ETA: {}",
-                        percent,
-                        snapshot.items_processed,
-                        snapshot.items_discovered,
+                        "{} | {:.1} items/s | {:.1} MB/s | Elapsed: {} | ETA: {}",
                         vol_str,
                         snapshot.items_per_sec,
                         snapshot.mb_per_sec,

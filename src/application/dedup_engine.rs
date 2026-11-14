@@ -1,5 +1,6 @@
 use chrono::Utc;
 use std::collections::{HashMap, HashSet};
+use std::io::IsTerminal;
 use std::time::Instant;
 use uuid::Uuid;
 
@@ -63,6 +64,7 @@ impl MediaDeduplicationEngine {
             MediaCategory::RawPhoto => 300.0,
             MediaCategory::Photo => 200.0,
             MediaCategory::Video => 100.0,
+            MediaCategory::Sidecar => 50.0,
         };
 
         let resolution_score = if let Some(dims) = fp.dimensions {
@@ -377,6 +379,7 @@ impl MediaDeduplicationEngine {
                             is_in_master_path: c.is_in_master,
                             reclaimable_bytes: 0,
                             evaluated_at,
+                            replication: None,
                         },
                     )
                 })
@@ -406,6 +409,12 @@ impl MediaDeduplicationEngine {
                         0
                     };
 
+                    let replication = if status == DeduplicationStatus::CanonicalMaster {
+                        c.doc.dedup.as_ref().and_then(|d| d.replication.clone())
+                    } else {
+                        None
+                    };
+
                     (
                         c.doc.id,
                         DeduplicationMetadata {
@@ -418,6 +427,7 @@ impl MediaDeduplicationEngine {
                             is_in_master_path: c.is_in_master,
                             reclaimable_bytes,
                             evaluated_at,
+                            replication,
                         },
                     )
                 })
@@ -446,6 +456,8 @@ impl MediaDeduplicationEngine {
             .map(|c| {
                 let status = if c.doc.id == best_candidate_id {
                     DeduplicationStatus::NeedsIngestToMaster
+                } else if c.is_in_master {
+                    DeduplicationStatus::ReplicaKeep
                 } else {
                     DeduplicationStatus::MarkForRemoval
                 };
@@ -468,6 +480,7 @@ impl MediaDeduplicationEngine {
                         is_in_master_path: c.is_in_master,
                         reclaimable_bytes,
                         evaluated_at,
+                        replication: None,
                     },
                 )
             })
@@ -492,12 +505,39 @@ impl MediaDeduplicationEngine {
     ) -> Result<DeduplicationSummary, DeduplicationError> {
         let start = Instant::now();
         let matcher = CanonicalPathMatcher::new(config.clone());
+        let is_tty = std::io::stderr().is_terminal();
+
+        let pb = if is_tty {
+            let p = indicatif::ProgressBar::new_spinner();
+            p.set_style(
+                indicatif::ProgressStyle::default_spinner()
+                    .template("{spinner:.green} {msg} | Elapsed: {elapsed}")
+                    .unwrap_or_else(|_| indicatif::ProgressStyle::default_spinner()),
+            );
+            p.set_message("Querying catalog content groups from MongoDB...");
+            p.enable_steady_tick(std::time::Duration::from_millis(120));
+            Some(p)
+        } else {
+            eprintln!("Querying catalog content groups from MongoDB...");
+            None
+        };
 
         // Step 1: Query all content groups (both unique count == 1 and duplicates count > 1)
         let content_groups = sink.query_all_content_groups(None).await?;
 
+        if let Some(ref p) = pb {
+            p.set_message(format!(
+                "Classifying {} catalog groups...",
+                content_groups.len()
+            ));
+        }
+
         let mut total_files_scanned = 0usize;
         let mut unique_media_count = 0usize;
+        let mut canonical_masters_count = 0usize;
+        let mut replica_files_preserved = 0usize;
+        let mut needs_ingest_files = 0usize;
+        let mut conflict_review_files = 0usize;
         let mut duplicate_clusters_count = 0usize;
         let mut exact_duplicate_files = 0usize;
         let mut total_reclaimable_bytes = 0u64;
@@ -506,23 +546,79 @@ impl MediaDeduplicationEngine {
 
         for (_hash, docs) in &content_groups {
             total_files_scanned += docs.len();
-            if docs.len() == 1 {
-                unique_media_count += 1;
-            } else {
-                duplicate_clusters_count += 1;
-                exact_duplicate_files += docs.len().saturating_sub(1);
-            }
 
             let evaluations = Self::evaluate_content_group(docs, &matcher);
+            let mut group_redundant_count = 0usize;
+            let mut group_has_master = false;
+
             for (id, meta) in evaluations {
-                total_reclaimable_bytes += meta.reclaimable_bytes;
+                match meta.status {
+                    DeduplicationStatus::CanonicalMaster => {
+                        group_has_master = true;
+                        canonical_masters_count += 1;
+                    }
+                    DeduplicationStatus::ReplicaKeep => {
+                        replica_files_preserved += 1;
+                    }
+                    DeduplicationStatus::NeedsIngestToMaster => {
+                        needs_ingest_files += 1;
+                        unique_media_count += 1;
+                    }
+                    DeduplicationStatus::MarkForRemoval => {
+                        group_redundant_count += 1;
+                        exact_duplicate_files += 1;
+                        total_reclaimable_bytes += meta.reclaimable_bytes;
+                    }
+                    DeduplicationStatus::ConflictReview => {
+                        conflict_review_files += 1;
+                    }
+                    DeduplicationStatus::Removed => {}
+                }
                 all_updates.push((id, meta));
+            }
+
+            if group_has_master {
+                unique_media_count += 1;
+            }
+
+            if group_redundant_count > 0 {
+                duplicate_clusters_count += 1;
             }
         }
 
+        if let Some(p) = pb {
+            p.finish_and_clear();
+        }
+
         if !dry_run && !all_updates.is_empty() {
-            for chunk in all_updates.chunks(500) {
+            let total_updates = all_updates.len();
+            let update_pb = if is_tty {
+                let p = indicatif::ProgressBar::new(total_updates as u64);
+                p.set_style(
+                    indicatif::ProgressStyle::default_bar()
+                        .template("{spinner:.green} [{bar:28.cyan/blue}] {percent}% | {pos}/{len} records ({per_sec}) | Elapsed: {elapsed} | ETA: {eta}")
+                        .unwrap_or_else(|_| indicatif::ProgressStyle::default_bar())
+                        .progress_chars("=> "),
+                );
+                p.enable_steady_tick(std::time::Duration::from_millis(150));
+                Some(p)
+            } else {
+                eprintln!(
+                    "Persisting {} classification updates to MongoDB...",
+                    total_updates
+                );
+                None
+            };
+
+            for chunk in all_updates.chunks(1000) {
                 sink.update_dedup_batch(chunk).await?;
+                if let Some(ref p) = update_pb {
+                    p.inc(chunk.len() as u64);
+                }
+            }
+
+            if let Some(p) = update_pb {
+                p.finish_and_clear();
             }
         }
 
@@ -535,6 +631,10 @@ impl MediaDeduplicationEngine {
             total_reclaimable_bytes,
             tier_pruned_percentage: 0.0,
             elapsed_seconds: start.elapsed().as_secs_f64(),
+            canonical_masters_count,
+            replica_files_preserved,
+            needs_ingest_files,
+            conflict_review_files,
         })
     }
 
@@ -551,47 +651,128 @@ impl MediaDeduplicationEngine {
     ) -> Result<DeduplicationSummary, DeduplicationError> {
         let start = Instant::now();
         let matcher = CanonicalPathMatcher::new(config.clone());
+        let is_tty = std::io::stderr().is_terminal();
+
+        let pb = if is_tty {
+            let p = indicatif::ProgressBar::new_spinner();
+            p.set_style(
+                indicatif::ProgressStyle::default_spinner()
+                    .template("{spinner:.green} {msg} | Elapsed: {elapsed}")
+                    .unwrap_or_else(|_| indicatif::ProgressStyle::default_spinner()),
+            );
+            p.set_message("Querying duplicate groups from MongoDB...");
+            p.enable_steady_tick(std::time::Duration::from_millis(120));
+            Some(p)
+        } else {
+            eprintln!("Querying duplicate groups from MongoDB...");
+            None
+        };
 
         // Step 1: Query all duplicate cryptographic groups from MongoDB
         let duplicate_groups = sink.query_duplicate_groups().await?;
 
+        if let Some(ref p) = pb {
+            p.set_message(format!(
+                "Classifying {} duplicate groups...",
+                duplicate_groups.len()
+            ));
+        }
+
         let mut all_updates: Vec<(Uuid, DeduplicationMetadata)> = Vec::new();
         let mut total_files_scanned = 0usize;
+        let mut unique_media_count = 0usize;
+        let mut canonical_masters_count = 0usize;
+        let mut replica_files_preserved = 0usize;
+        let mut needs_ingest_files = 0usize;
+        let mut conflict_review_files = 0usize;
+        let mut duplicate_clusters_count = 0usize;
         let mut exact_duplicate_files = 0usize;
         let mut total_reclaimable_bytes = 0u64;
-        let mut unique_masters_count = 0usize;
 
         // Step 2: Evaluate replica hierarchy for each group
         for (_hash, docs) in &duplicate_groups {
             total_files_scanned += docs.len();
             let updates = Self::evaluate_replica_cluster(docs, &matcher);
 
+            let mut group_redundant_count = 0usize;
+            let mut group_has_master = false;
+
             for (id, meta) in updates {
                 match meta.status {
                     DeduplicationStatus::MarkForRemoval => {
+                        group_redundant_count += 1;
                         exact_duplicate_files += 1;
                         total_reclaimable_bytes += meta.reclaimable_bytes;
                     }
-                    DeduplicationStatus::CanonicalMaster
-                    | DeduplicationStatus::ReplicaKeep
-                    | DeduplicationStatus::NeedsIngestToMaster => {
-                        unique_masters_count += 1;
+                    DeduplicationStatus::CanonicalMaster => {
+                        group_has_master = true;
+                        canonical_masters_count += 1;
                     }
-                    _ => {}
+                    DeduplicationStatus::ReplicaKeep => {
+                        replica_files_preserved += 1;
+                    }
+                    DeduplicationStatus::NeedsIngestToMaster => {
+                        needs_ingest_files += 1;
+                        unique_media_count += 1;
+                    }
+                    DeduplicationStatus::ConflictReview => {
+                        conflict_review_files += 1;
+                    }
+                    DeduplicationStatus::Removed => {}
                 }
                 all_updates.push((id, meta));
             }
+
+            if group_has_master {
+                unique_media_count += 1;
+            }
+
+            if group_redundant_count > 0 {
+                duplicate_clusters_count += 1;
+            }
+        }
+
+        if let Some(p) = pb {
+            p.finish_and_clear();
         }
 
         // Step 3: Persist updates if not in dry-run mode
         if !dry_run && !all_updates.is_empty() {
-            sink.update_dedup_batch(&all_updates).await?;
+            let total_updates = all_updates.len();
+            let update_pb = if is_tty {
+                let p = indicatif::ProgressBar::new(total_updates as u64);
+                p.set_style(
+                    indicatif::ProgressStyle::default_bar()
+                        .template("{spinner:.green} [{bar:28.cyan/blue}] {percent}% | {pos}/{len} records ({per_sec}) | Elapsed: {elapsed} | ETA: {eta}")
+                        .unwrap_or_else(|_| indicatif::ProgressStyle::default_bar())
+                        .progress_chars("=> "),
+                );
+                p.enable_steady_tick(std::time::Duration::from_millis(150));
+                Some(p)
+            } else {
+                eprintln!(
+                    "Persisting {} classification updates to MongoDB...",
+                    total_updates
+                );
+                None
+            };
+
+            for chunk in all_updates.chunks(1000) {
+                sink.update_dedup_batch(chunk).await?;
+                if let Some(ref p) = update_pb {
+                    p.inc(chunk.len() as u64);
+                }
+            }
+
+            if let Some(p) = update_pb {
+                p.finish_and_clear();
+            }
         }
 
         let summary = DeduplicationSummary {
             total_files_scanned,
-            unique_media_count: unique_masters_count,
-            duplicate_clusters_count: duplicate_groups.len(),
+            unique_media_count,
+            duplicate_clusters_count,
             exact_duplicate_files,
             near_duplicate_files: 0,
             total_reclaimable_bytes,
@@ -601,6 +782,10 @@ impl MediaDeduplicationEngine {
                 0.0
             },
             elapsed_seconds: start.elapsed().as_secs_f64(),
+            canonical_masters_count,
+            replica_files_preserved,
+            needs_ingest_files,
+            conflict_review_files,
         };
 
         Ok(summary)
@@ -668,6 +853,10 @@ impl DeduplicationEngine for MediaDeduplicationEngine {
             total_reclaimable_bytes: total_reclaimable,
             tier_pruned_percentage: pruned_pct as f64,
             elapsed_seconds: start.elapsed().as_secs_f64(),
+            canonical_masters_count: all_clusters.len(),
+            replica_files_preserved: 0,
+            needs_ingest_files: 0,
+            conflict_review_files: 0,
         };
 
         Ok((all_clusters, summary))

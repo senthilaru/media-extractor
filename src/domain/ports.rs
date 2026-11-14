@@ -208,6 +208,21 @@ pub trait MetadataStorageSink: Send + Sync {
     /// Marks a document as physically removed.
     async fn mark_removed(&self, doc_id: uuid::Uuid) -> Result<(), StorageError>;
 
+    /// Permanently deletes a single document by its UUID.
+    /// Returns true if a document was matched and deleted.
+    async fn delete_document(&self, doc_id: uuid::Uuid) -> Result<bool, StorageError>;
+
+    /// Permanently deletes multiple documents by their UUIDs in a single batch.
+    /// Returns the number of documents deleted.
+    async fn delete_documents(&self, doc_ids: &[uuid::Uuid]) -> Result<usize, StorageError>;
+
+    /// Purges all documents on a specific drive mount path prefix that are marked with status `Removed`.
+    /// Returns the number of purged documents.
+    async fn purge_removed_records(
+        &self,
+        mount_prefix: Option<&str>,
+    ) -> Result<usize, StorageError>;
+
     /// Queries all content groups grouped by cryptographic hash across the database,
     /// including unique assets (count == 1) and duplicate clusters (count > 1).
     async fn query_all_content_groups(
@@ -235,6 +250,23 @@ pub trait MetadataStorageSink: Send + Sync {
         _links: &[(String, uuid::Uuid, std::path::PathBuf)],
     ) -> Result<usize, StorageError> {
         Ok(0)
+    }
+
+    /// Updates the replication tracking state for a canonical master document.
+    async fn update_master_replication_state(
+        &self,
+        _master_id: uuid::Uuid,
+        _replication_state: &crate::domain::dedup_models::MasterReplicationState,
+    ) -> Result<(), StorageError> {
+        Ok(())
+    }
+
+    /// Queries all canonical master documents matching a specific replication status.
+    async fn query_masters_by_replication_status(
+        &self,
+        _status: crate::domain::dedup_models::ReplicationStatus,
+    ) -> Result<Vec<MediaMetadataDocument>, StorageError> {
+        Ok(Vec::new())
     }
 }
 

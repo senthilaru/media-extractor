@@ -8,7 +8,8 @@ use uuid::Uuid;
 use metadata_extractor::application::ingest_service::MasterIngestService;
 use metadata_extractor::domain::dedup_models::{
     DeduplicationMetadata, DeduplicationStatus, DriveConfiguration, DriveDefinition,
-    DriveGroupSpec, DriveRules, IngestOptions, IngestTaskStatus, MediaFingerprint,
+    DriveGroupSpec, DriveRules, IngestOptions, IngestTaskStatus, MasterReplicationState,
+    MediaFingerprint, ReplicationStatus,
 };
 use metadata_extractor::domain::errors::StorageError;
 use metadata_extractor::domain::metadata_models::{
@@ -83,9 +84,32 @@ impl MetadataStorageSink for MockIngestStorageSink {
 
     async fn query_removal_candidates(
         &self,
-        _mount_prefix: Option<&str>,
+        mount_prefix: Option<&str>,
     ) -> Result<Vec<MediaMetadataDocument>, StorageError> {
-        Ok(Vec::new())
+        let guard = self.documents.lock().unwrap();
+        let candidates = guard
+            .values()
+            .filter(|doc| {
+                if let Some(ref d) = doc.dedup {
+                    if d.status != DeduplicationStatus::MarkForRemoval {
+                        return false;
+                    }
+                } else {
+                    return false;
+                }
+
+                if let Some(prefix) = mount_prefix {
+                    doc.file_context
+                        .file_path
+                        .to_string_lossy()
+                        .starts_with(prefix)
+                } else {
+                    true
+                }
+            })
+            .cloned()
+            .collect();
+        Ok(candidates)
     }
 
     async fn query_unmastered_candidates(
@@ -135,6 +159,68 @@ impl MetadataStorageSink for MockIngestStorageSink {
             }
         }
         Ok(())
+    }
+
+    async fn delete_document(&self, doc_id: Uuid) -> Result<bool, StorageError> {
+        let mut guard = self.documents.lock().unwrap();
+        if let Some(doc) = guard.get(&doc_id) {
+            if let Some(ref d) = doc.dedup {
+                if d.status == DeduplicationStatus::CanonicalMaster
+                    || d.status == DeduplicationStatus::ReplicaKeep
+                {
+                    return Ok(false);
+                }
+            }
+        }
+        Ok(guard.remove(&doc_id).is_some())
+    }
+
+    async fn delete_documents(&self, doc_ids: &[Uuid]) -> Result<usize, StorageError> {
+        let mut count = 0;
+        for id in doc_ids {
+            if self.delete_document(*id).await? {
+                count += 1;
+            }
+        }
+        Ok(count)
+    }
+
+    async fn purge_removed_records(
+        &self,
+        mount_prefix: Option<&str>,
+    ) -> Result<usize, StorageError> {
+        let mut guard = self.documents.lock().unwrap();
+        let to_remove: Vec<Uuid> = guard
+            .values()
+            .filter(|doc| {
+                if let Some(ref d) = doc.dedup {
+                    if d.status != DeduplicationStatus::Removed {
+                        return false;
+                    }
+                } else {
+                    return false;
+                }
+                if let Some(prefix) = mount_prefix {
+                    doc.file_context
+                        .file_path
+                        .to_string_lossy()
+                        .starts_with(prefix)
+                        || doc
+                            .file_context
+                            .scanned_root
+                            .to_string_lossy()
+                            .starts_with(prefix)
+                } else {
+                    true
+                }
+            })
+            .map(|d| d.id)
+            .collect();
+
+        for id in &to_remove {
+            guard.remove(id);
+        }
+        Ok(to_remove.len())
     }
 
     async fn query_all_content_groups(
@@ -221,6 +307,39 @@ impl MetadataStorageSink for MockIngestStorageSink {
         }
         Ok(count)
     }
+
+    async fn update_master_replication_state(
+        &self,
+        master_id: Uuid,
+        replication_state: &MasterReplicationState,
+    ) -> Result<(), StorageError> {
+        let mut guard = self.documents.lock().unwrap();
+        if let Some(doc) = guard.get_mut(&master_id) {
+            if let Some(ref mut d) = doc.dedup {
+                d.replication = Some(replication_state.clone());
+            }
+        }
+        Ok(())
+    }
+
+    async fn query_masters_by_replication_status(
+        &self,
+        status: ReplicationStatus,
+    ) -> Result<Vec<MediaMetadataDocument>, StorageError> {
+        let guard = self.documents.lock().unwrap();
+        let matches = guard
+            .values()
+            .filter(|d| {
+                d.dedup
+                    .as_ref()
+                    .and_then(|meta| meta.replication.as_ref())
+                    .map(|r| r.status == status)
+                    .unwrap_or(false)
+            })
+            .cloned()
+            .collect();
+        Ok(matches)
+    }
 }
 
 fn create_unmastered_doc(
@@ -276,6 +395,7 @@ fn create_unmastered_doc(
             is_in_master_path: false,
             reclaimable_bytes: 0,
             evaluated_at: dt,
+            replication: None,
         }),
     }
 }
@@ -355,6 +475,7 @@ async fn test_ingest_plan_compilation_and_dry_run() {
         dry_run: true,
         delete_source: false,
         verify_hash: true,
+        buffer_config: Default::default(),
     };
 
     let plan = service
@@ -397,6 +518,13 @@ async fn test_ingest_execution_with_integrity_and_collision_handling() {
             description: None,
         },
     );
+    groups.insert(
+        "staging".to_string(),
+        DriveGroupSpec {
+            priority: 20,
+            description: None,
+        },
+    );
 
     let config = DriveConfiguration {
         version: "1.0".to_string(),
@@ -410,7 +538,7 @@ async fn test_ingest_execution_with_integrity_and_collision_handling() {
             },
             DriveDefinition {
                 id: "source_dump".to_string(),
-                group: "primary".to_string(),
+                group: "staging".to_string(),
                 mount_path: source_mount.clone(),
                 master_path: source_mount.join("master"),
             },
@@ -453,6 +581,7 @@ async fn test_ingest_execution_with_integrity_and_collision_handling() {
         dry_run: false,
         delete_source: true, // test immediate deletion
         verify_hash: true,
+        buffer_config: Default::default(),
     };
 
     let report = service
@@ -518,6 +647,13 @@ async fn test_ingest_integrity_mismatch_rollback() {
             description: None,
         },
     );
+    groups.insert(
+        "staging".to_string(),
+        DriveGroupSpec {
+            priority: 20,
+            description: None,
+        },
+    );
 
     let config = DriveConfiguration {
         version: "1.0".to_string(),
@@ -531,7 +667,7 @@ async fn test_ingest_integrity_mismatch_rollback() {
             },
             DriveDefinition {
                 id: "source_dump".to_string(),
-                group: "primary".to_string(),
+                group: "staging".to_string(),
                 mount_path: source_mount.clone(),
                 master_path: source_mount.join("master"),
             },
@@ -564,6 +700,7 @@ async fn test_ingest_integrity_mismatch_rollback() {
         dry_run: false,
         delete_source: false,
         verify_hash: true,
+        buffer_config: Default::default(),
     };
 
     let report = service
@@ -667,6 +804,7 @@ async fn test_ingest_source_on_replica_transitions_to_replica_keep() {
         dry_run: false,
         delete_source: true, // Even if delete_source is set, replica copy must NOT be deleted
         verify_hash: true,
+        buffer_config: Default::default(),
     };
 
     let report = service
@@ -782,6 +920,7 @@ async fn test_ingest_and_replicate_fanout_end_to_end() {
         dry_run: false,
         delete_source: false,
         verify_hash: true,
+        buffer_config: Default::default(),
     };
 
     let ingest_report = ingest_service
@@ -807,6 +946,7 @@ async fn test_ingest_and_replicate_fanout_end_to_end() {
         primary_drive_id: Some("primary_main".to_string()),
         dry_run: false,
         verify_hash: true,
+        buffer_config: Default::default(),
     };
 
     let rep_report = rep_service
@@ -896,6 +1036,7 @@ async fn test_ingest_source_drive_unconfigured_external_or_local_directory() {
         dry_run: true,
         delete_source: false,
         verify_hash: true,
+        buffer_config: Default::default(),
     };
 
     let plan = service
@@ -918,6 +1059,7 @@ async fn test_ingest_source_drive_unconfigured_external_or_local_directory() {
         dry_run: false,
         delete_source: false,
         verify_hash: true,
+        buffer_config: Default::default(),
     };
 
     let report = service
@@ -941,6 +1083,7 @@ async fn test_ingest_source_drive_unconfigured_external_or_local_directory() {
         dry_run: true,
         delete_source: false,
         verify_hash: true,
+        buffer_config: Default::default(),
     };
     let err = service
         .compile_plan(&sink, &config, &bad_options)
@@ -1024,6 +1167,7 @@ async fn test_ingest_updates_canonical_master_id_for_all_duplicate_records() {
                 0
             },
             evaluated_at: now,
+            replication: None,
         }),
     };
 
@@ -1080,6 +1224,7 @@ async fn test_ingest_updates_canonical_master_id_for_all_duplicate_records() {
         dry_run: false,
         delete_source: false,
         verify_hash: true,
+        buffer_config: Default::default(),
     };
 
     let report = service
@@ -1133,4 +1278,370 @@ async fn test_ingest_updates_canonical_master_id_for_all_duplicate_records() {
         dedup3.canonical_master_path,
         Some(master_doc.file_context.file_path.clone())
     );
+}
+
+#[tokio::test]
+async fn test_ingest_5_copies_cluster_registers_master_and_links_all_duplicates_and_initializes_replication(
+) {
+    let source_dir = tempdir().unwrap();
+    let master_dir = tempdir().unwrap();
+    let replica_dir = tempdir().unwrap();
+
+    let content = b"cluster of 5 identical files test content";
+    let file_names = [
+        "lv_0_20260724194130.mp4",
+        "lv_0_20260724194130 copy.mp4",
+        "lv_0_20260724194130 copy 2.mp4",
+        "lv_0_20260724194130 copy 3.mp4",
+        "lv_0_20260724194130 copy 4.mp4",
+    ];
+
+    let mut file_paths = Vec::new();
+    for name in &file_names {
+        let path = source_dir.path().join(name);
+        std::fs::write(&path, content).unwrap();
+        file_paths.push(path);
+    }
+
+    let hasher = Blake3MediaHasher::new();
+    let hash = hasher.compute_cryptographic_hash(&file_paths[0]).unwrap();
+
+    let sink = MockIngestStorageSink::default();
+    let now = Utc::now();
+    let cluster_id = Uuid::new_v4();
+
+    let mut doc_ids = Vec::new();
+    let mut docs = Vec::new();
+
+    // In a dedup pass, 1 is marked NeedsIngestToMaster (best candidate), and the other 4 are MarkForRemoval
+    for (idx, path) in file_paths.iter().enumerate() {
+        let id = Uuid::new_v4();
+        doc_ids.push(id);
+        let status = if idx == 3 {
+            // Pick copy 3 as best candidate (mirroring user case)
+            DeduplicationStatus::NeedsIngestToMaster
+        } else {
+            DeduplicationStatus::MarkForRemoval
+        };
+
+        docs.push(MediaMetadataDocument {
+            id,
+            file_context: FileContext {
+                scanned_root: source_dir.path().to_path_buf(),
+                file_path: path.clone(),
+                relative_path: path.clone(),
+                file_name: path.file_name().unwrap().to_string_lossy().to_string(),
+                file_size_bytes: content.len() as u64,
+                extension: "mp4".to_string(),
+                media_category: MediaCategory::Video,
+                modified_at: Some(now),
+            },
+            temporal: TemporalMetadata::from_utc_datetime(
+                now,
+                TimestampSource::ExifDateTimeOriginal,
+            ),
+            camera: None,
+            exposure: None,
+            location: None,
+            dimensions: None,
+            video: None,
+            fingerprint: Some(MediaFingerprint {
+                id: Uuid::new_v4(),
+                file_path: path.clone(),
+                file_size_bytes: content.len() as u64,
+                media_category: MediaCategory::Video,
+                dimensions: None,
+                sample_digest: None,
+                cryptographic_hash: hash.clone(),
+                perceptual_hash: None,
+                phash_hex: None,
+                rotated_hashes: None,
+                is_low_entropy: false,
+                fingerprinted_at: now,
+            }),
+            extraction_status: ExtractionStatus::default(),
+            dedup: Some(DeduplicationMetadata {
+                cluster_id,
+                status,
+                canonical_master_id: None,
+                canonical_master_path: None,
+                drive_id: Some("samples".to_string()),
+                drive_group: None,
+                is_in_master_path: false,
+                reclaimable_bytes: if status == DeduplicationStatus::MarkForRemoval {
+                    content.len() as u64
+                } else {
+                    0
+                },
+                evaluated_at: now,
+                replication: None,
+            }),
+        });
+    }
+
+    sink.save_batch(&docs).await.unwrap();
+
+    let mut groups = HashMap::new();
+    groups.insert(
+        "primary".to_string(),
+        DriveGroupSpec {
+            priority: 100,
+            description: None,
+        },
+    );
+    groups.insert(
+        "replica".to_string(),
+        DriveGroupSpec {
+            priority: 50,
+            description: None,
+        },
+    );
+
+    let config = DriveConfiguration {
+        version: "1.0".to_string(),
+        groups,
+        drives: vec![
+            DriveDefinition {
+                id: "samples".to_string(),
+                mount_path: source_dir.path().to_path_buf(),
+                master_path: source_dir.path().to_path_buf(),
+                group: "staging".to_string(),
+            },
+            DriveDefinition {
+                id: "primary_main".to_string(),
+                mount_path: master_dir.path().to_path_buf(),
+                master_path: master_dir.path().join("master"),
+                group: "primary".to_string(),
+            },
+            DriveDefinition {
+                id: "replica1".to_string(),
+                mount_path: replica_dir.path().to_path_buf(),
+                master_path: replica_dir.path().join("master"),
+                group: "replica".to_string(),
+            },
+        ],
+        rules: DriveRules::default(),
+    };
+
+    let service = MasterIngestService::new();
+    let options = IngestOptions {
+        source_drive: source_dir.path().to_string_lossy().to_string(),
+        target_drive: None,
+        dry_run: false,
+        delete_source: false,
+        verify_hash: true,
+        buffer_config: Default::default(),
+    };
+
+    let report = service
+        .execute_ingest(&sink, &config, options)
+        .await
+        .unwrap();
+
+    // Verify Ingestion Report metrics
+    assert_eq!(report.files_transferred, 1);
+    assert_eq!(report.files_failed, 0);
+    assert_eq!(report.duplicates_linked, 5); // All 5 copies linked!
+    assert_eq!(report.replication_pending_count, 1); // 1 master asset pending replication to replica1
+
+    // Verify CanonicalMaster in DB:
+    let masters = sink.query_canonical_masters().await.unwrap();
+    assert_eq!(masters.len(), 1);
+    let master_doc = &masters[0];
+    let new_master_id = master_doc.id;
+    assert!(!doc_ids.contains(&new_master_id));
+    assert!(master_doc.file_context.file_path.exists());
+    assert_eq!(
+        master_doc
+            .file_context
+            .file_path
+            .parent()
+            .unwrap()
+            .file_name()
+            .unwrap(),
+        "Videos"
+    );
+
+    // Verify master replication status is initialized to Pending for replica1
+    let master_rep = master_doc
+        .dedup
+        .as_ref()
+        .unwrap()
+        .replication
+        .as_ref()
+        .unwrap();
+    assert_eq!(master_rep.status, ReplicationStatus::Pending);
+    assert_eq!(master_rep.pending_drives, vec!["replica1".to_string()]);
+    assert_eq!(master_rep.replicated_drives.len(), 0);
+
+    // Verify ALL 5 copies in the cluster have canonical_master_id & canonical_master_path set
+    for id in &doc_ids {
+        let doc = sink.find_document_by_id(*id).await.unwrap().unwrap();
+        let dedup = doc.dedup.unwrap();
+        assert_eq!(dedup.status, DeduplicationStatus::MarkForRemoval);
+        assert_eq!(dedup.canonical_master_id, Some(new_master_id));
+        assert_eq!(
+            dedup.canonical_master_path,
+            Some(master_doc.file_context.file_path.clone())
+        );
+    }
+
+    // Verify that DrivePruningService generates manifest for all 5 duplicates with zero warnings
+    let pruner = metadata_extractor::application::drive_pruner::DrivePruningService::new();
+    let manifest = pruner
+        .generate_manifest(&sink, &config, "samples", true)
+        .await
+        .unwrap();
+    assert_eq!(manifest.total_files_to_remove, 5);
+    assert_eq!(manifest.removal_tasks.len(), 5);
+    for task in &manifest.removal_tasks {
+        assert!(task.master_exists_verified);
+    }
+    assert_eq!(manifest.total_reclaimable_bytes, (content.len() * 5) as u64);
+}
+
+#[tokio::test]
+async fn test_ingest_delete_source_never_deletes_protected_archive() {
+    let source_dir = tempdir().unwrap();
+    let replica_dir = tempdir().unwrap();
+    let master_dir = tempdir().unwrap();
+
+    let replica_file = replica_dir.path().join("Videos/precious_backup.mp4");
+    std::fs::create_dir_all(replica_file.parent().unwrap()).unwrap();
+    let content = b"irreplaceable video backup on replica";
+    std::fs::write(&replica_file, content).unwrap();
+
+    let hasher = Blake3MediaHasher::new();
+    let hash = hasher.compute_cryptographic_hash(&replica_file).unwrap();
+
+    let sink = MockIngestStorageSink::default();
+    let replica_doc_id = Uuid::new_v4();
+    let replica_doc = MediaMetadataDocument {
+        id: replica_doc_id,
+        file_context: FileContext {
+            scanned_root: replica_dir.path().to_path_buf(),
+            file_path: replica_file.clone(),
+            relative_path: PathBuf::from("Videos/precious_backup.mp4"),
+            file_name: "precious_backup.mp4".to_string(),
+            file_size_bytes: content.len() as u64,
+            extension: "mp4".to_string(),
+            media_category: MediaCategory::Video,
+            modified_at: Some(Utc::now()),
+        },
+        temporal: TemporalMetadata::from_utc_datetime(
+            Utc::now(),
+            TimestampSource::ExifDateTimeOriginal,
+        ),
+        camera: None,
+        exposure: None,
+        location: None,
+        dimensions: None,
+        video: None,
+        fingerprint: Some(MediaFingerprint {
+            id: Uuid::new_v4(),
+            file_path: replica_file.clone(),
+            file_size_bytes: content.len() as u64,
+            media_category: MediaCategory::Video,
+            dimensions: None,
+            sample_digest: None,
+            cryptographic_hash: hash.clone(),
+            perceptual_hash: None,
+            phash_hex: None,
+            rotated_hashes: None,
+            is_low_entropy: false,
+            fingerprinted_at: Utc::now(),
+        }),
+        extraction_status: Default::default(),
+        dedup: Some(DeduplicationMetadata {
+            cluster_id: Uuid::new_v4(),
+            status: DeduplicationStatus::NeedsIngestToMaster,
+            canonical_master_id: None,
+            canonical_master_path: None,
+            drive_id: Some("replica_drive".to_string()),
+            drive_group: Some("replica1".to_string()),
+            is_in_master_path: false,
+            reclaimable_bytes: 0,
+            evaluated_at: Utc::now(),
+            replication: None,
+        }),
+    };
+    sink.save_batch(&[replica_doc]).await.unwrap();
+
+    let mut groups = HashMap::new();
+    groups.insert(
+        "primary".to_string(),
+        DriveGroupSpec {
+            priority: 100,
+            description: None,
+        },
+    );
+    groups.insert(
+        "replica1".to_string(),
+        DriveGroupSpec {
+            priority: 80,
+            description: None,
+        },
+    );
+    groups.insert(
+        "staging".to_string(),
+        DriveGroupSpec {
+            priority: 20,
+            description: None,
+        },
+    );
+
+    let config = DriveConfiguration {
+        version: "1.0".to_string(),
+        groups,
+        drives: vec![
+            DriveDefinition {
+                id: "replica_drive".to_string(),
+                mount_path: replica_dir.path().to_path_buf(),
+                master_path: replica_dir.path().to_path_buf(),
+                group: "replica1".to_string(),
+            },
+            DriveDefinition {
+                id: "primary_main".to_string(),
+                mount_path: master_dir.path().to_path_buf(),
+                master_path: master_dir.path().join("master"),
+                group: "primary".to_string(),
+            },
+            DriveDefinition {
+                id: "staging_drive".to_string(),
+                mount_path: source_dir.path().to_path_buf(),
+                master_path: source_dir.path().to_path_buf(),
+                group: "staging".to_string(),
+            },
+        ],
+        rules: DriveRules::default(),
+    };
+
+    let service = MasterIngestService::new();
+    let opts = IngestOptions {
+        source_drive: replica_dir.path().to_string_lossy().to_string(),
+        target_drive: None,
+        dry_run: false,
+        delete_source: true, // Requested delete_source!
+        verify_hash: true,
+        buffer_config: Default::default(),
+    };
+
+    let report = service.execute_ingest(&sink, &config, opts).await.unwrap();
+
+    // Source deletion on replica must be refused
+    assert_eq!(report.files_transferred, 1);
+    assert_eq!(report.source_files_deleted, 0);
+    assert!(
+        replica_file.exists(),
+        "File on replica drive must NEVER be deleted!"
+    );
+
+    // Status in DB must not be Removed
+    let updated_doc = sink
+        .find_document_by_id(replica_doc_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let status = updated_doc.dedup.unwrap().status;
+    assert_ne!(status, DeduplicationStatus::Removed);
 }

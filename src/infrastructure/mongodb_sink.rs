@@ -93,6 +93,11 @@ impl MetadataStorageSink for MongoDbStorageSink {
 
     async fn ensure_indexes(&self) -> Result<(), StorageError> {
         let indexes = vec![
+            // Unique index on document UUID string for O(1) bulk updates and deletions
+            IndexModel::builder()
+                .keys(doc! { "id": 1 })
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
             // Unique index on file path for idempotent upserts
             IndexModel::builder()
                 .keys(doc! { "file_context.file_path": 1 })
@@ -588,6 +593,89 @@ impl MetadataStorageSink for MongoDbStorageSink {
             })?;
 
         Ok(())
+    }
+
+    async fn delete_document(&self, doc_id: uuid::Uuid) -> Result<bool, StorageError> {
+        // Safety guard: NEVER delete CanonicalMaster or ReplicaKeep records
+        let filter = doc! {
+            "id": doc_id.to_string(),
+            "dedup.status": {
+                "$nin": [
+                    DeduplicationStatus::CanonicalMaster.to_string(),
+                    DeduplicationStatus::ReplicaKeep.to_string(),
+                ]
+            }
+        };
+
+        let res =
+            self.collection
+                .delete_one(filter)
+                .await
+                .map_err(|e| StorageError::QueryFailed {
+                    collection: self.config.collection_name.clone(),
+                    message: format!("Failed deleting document {}: {}", doc_id, e),
+                })?;
+
+        Ok(res.deleted_count > 0)
+    }
+
+    async fn delete_documents(&self, doc_ids: &[uuid::Uuid]) -> Result<usize, StorageError> {
+        if doc_ids.is_empty() {
+            return Ok(0);
+        }
+        let ids: Vec<String> = doc_ids.iter().map(|id| id.to_string()).collect();
+        // Safety guard: NEVER delete CanonicalMaster or ReplicaKeep records
+        let filter = doc! {
+            "id": { "$in": ids },
+            "dedup.status": {
+                "$nin": [
+                    DeduplicationStatus::CanonicalMaster.to_string(),
+                    DeduplicationStatus::ReplicaKeep.to_string(),
+                ]
+            }
+        };
+
+        let res =
+            self.collection
+                .delete_many(filter)
+                .await
+                .map_err(|e| StorageError::QueryFailed {
+                    collection: self.config.collection_name.clone(),
+                    message: format!("Failed batch deleting {} documents: {}", doc_ids.len(), e),
+                })?;
+
+        Ok(res.deleted_count as usize)
+    }
+
+    async fn purge_removed_records(
+        &self,
+        mount_prefix: Option<&str>,
+    ) -> Result<usize, StorageError> {
+        let mut filter = doc! {
+            "dedup.status": DeduplicationStatus::Removed.to_string()
+        };
+
+        if let Some(prefix) = mount_prefix {
+            let escaped_prefix = regex_escape(prefix);
+            filter.insert(
+                "$or",
+                vec![
+                    doc! { "file_context.scanned_root": { "$regex": format!("^{}", escaped_prefix) } },
+                    doc! { "file_context.file_path": { "$regex": format!("^{}", escaped_prefix) } },
+                ],
+            );
+        }
+
+        let res =
+            self.collection
+                .delete_many(filter)
+                .await
+                .map_err(|e| StorageError::QueryFailed {
+                    collection: self.config.collection_name.clone(),
+                    message: format!("Failed purging removed records: {}", e),
+                })?;
+
+        Ok(res.deleted_count as usize)
     }
 
     async fn query_all_content_groups(

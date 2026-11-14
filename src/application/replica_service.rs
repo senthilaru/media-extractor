@@ -1,5 +1,6 @@
 use chrono::Utc;
 use std::collections::HashSet;
+use std::io::IsTerminal;
 use std::time::Instant;
 use uuid::Uuid;
 
@@ -7,12 +8,14 @@ use crate::application::drive_pruner::DrivePruningService;
 use crate::application::transfer_service::UnifiedFileTransferService;
 use crate::domain::dedup_models::{
     DeduplicationMetadata, DeduplicationStatus, DriveConfiguration, DriveDefinition,
-    IngestTaskStatus, PathResolution, ReplicaSyncPlan, ReplicaSyncReport, ReplicaSyncTask,
+    IngestTaskStatus, MasterReplicationState, PathResolution, ReplicaSyncPlan, ReplicaSyncReport,
+    ReplicaSyncTask, ReplicationStatus, TransferBufferConfig,
 };
 use crate::domain::errors::DeduplicationError;
 use crate::domain::metadata_models::{FileContext, MediaMetadataDocument};
 use crate::domain::ports::MetadataStorageSink;
 use crate::infrastructure::blake3_hasher::Blake3MediaHasher;
+use crate::infrastructure::drive_spindle_lock::DriveSpindleLockManager;
 
 /// Runtime options for a replica synchronization run.
 #[derive(Debug, Clone)]
@@ -21,16 +24,35 @@ pub struct ReplicaSyncOptions {
     pub primary_drive_id: Option<String>,
     pub dry_run: bool,
     pub verify_hash: bool,
+    pub buffer_config: TransferBufferConfig,
+}
+
+impl Default for ReplicaSyncOptions {
+    fn default() -> Self {
+        Self {
+            target_replica_id: None,
+            primary_drive_id: None,
+            dry_run: false,
+            verify_hash: true,
+            buffer_config: TransferBufferConfig::default(),
+        }
+    }
 }
 
 /// Service orchestrating fanout replication of CanonicalMaster media assets
 /// to all configured and mounted replica drives.
 #[derive(Debug, Default, Clone)]
-pub struct ReplicaSyncService;
+pub struct ReplicaSyncService {
+    spindle_locks: DriveSpindleLockManager,
+}
 
 impl ReplicaSyncService {
     pub fn new() -> Self {
-        Self
+        Self::default()
+    }
+
+    pub fn with_spindle_locks(spindle_locks: DriveSpindleLockManager) -> Self {
+        Self { spindle_locks }
     }
 
     /// Resolves primary drive and candidate replica drives from configuration.
@@ -40,24 +62,41 @@ impl ReplicaSyncService {
         target_replica_id: Option<&str>,
     ) -> Result<(&'a DriveDefinition, Vec<&'a DriveDefinition>), DeduplicationError> {
         let primary_drive = if let Some(p_id) = primary_id {
-            DrivePruningService::resolve_drive(config, p_id).ok_or_else(|| {
-                DeduplicationError::ConfigError(format!(
-                    "Primary drive '{}' not found in configuration",
-                    p_id
-                ))
-            })?
+            DrivePruningService::resolve_drive(config, p_id)
+                .or_else(|| {
+                    config
+                        .drives
+                        .iter()
+                        .find(|d| d.group.eq_ignore_ascii_case(p_id))
+                })
+                .ok_or_else(|| {
+                    DeduplicationError::ConfigError(format!(
+                        "Primary drive '{}' not found in configuration",
+                        p_id
+                    ))
+                })?
         } else {
-            let primaries: Vec<&DriveDefinition> = config
-                .drives
-                .iter()
-                .filter(|d| d.group.eq_ignore_ascii_case("primary"))
-                .collect();
-            if primaries.is_empty() {
+            if config.drives.is_empty() {
                 return Err(DeduplicationError::ConfigError(
-                    "No drive with group 'primary' configured in drives.yaml".to_string(),
+                    "No drives configured in drives.yaml".to_string(),
                 ));
             }
-            primaries[0]
+
+            // Rank configured drives by group priority descending
+            let mut candidates: Vec<&DriveDefinition> = config.drives.iter().collect();
+            candidates.sort_by(|a, b| {
+                let prio_a = config.groups.get(&a.group).map(|g| g.priority).unwrap_or(0);
+                let prio_b = config.groups.get(&b.group).map(|g| g.priority).unwrap_or(0);
+                prio_b.cmp(&prio_a).then_with(|| a.id.cmp(&b.id))
+            });
+
+            // Find first drive that is currently mounted on disk
+            let mounted = candidates.iter().copied().find(|d| d.mount_path.exists());
+
+            match mounted {
+                Some(drive) => drive,
+                None => candidates[0],
+            }
         };
 
         let replica_drives: Vec<&DriveDefinition> = if let Some(target_id) = target_replica_id {
@@ -75,7 +114,7 @@ impl ReplicaSyncService {
                 .filter(|d| {
                     d.id != primary_drive.id
                         && (d.group.starts_with("replica")
-                            || d.group.eq_ignore_ascii_case("replica"))
+                            || d.group.eq_ignore_ascii_case("secondary"))
                 })
                 .collect()
         };
@@ -146,6 +185,10 @@ impl ReplicaSyncService {
                         .map(|h| existing_hashes.contains(h))
                         .unwrap_or(false);
 
+                if is_already_registered {
+                    continue; // Already replicated and cataloged on this replica drive
+                }
+
                 // Derive canonical relative path
                 let rel_path = match master
                     .file_context
@@ -186,12 +229,7 @@ impl ReplicaSyncService {
                 );
 
                 let (dest_path, status) = match resolution {
-                    PathResolution::IdenticalExists(p) => {
-                        if is_already_registered {
-                            continue; // Already on disk and registered in DB
-                        }
-                        (p, IngestTaskStatus::SkippedIdentical)
-                    }
+                    PathResolution::IdenticalExists(p) => (p, IngestTaskStatus::SkippedIdentical),
                     PathResolution::Available(p) | PathResolution::CollisionResolved(p) => {
                         (p, IngestTaskStatus::Pending)
                     }
@@ -234,8 +272,19 @@ impl ReplicaSyncService {
         config: &DriveConfiguration,
         options: ReplicaSyncOptions,
     ) -> Result<ReplicaSyncReport, DeduplicationError> {
-        let start = Instant::now();
         let plan = self.compile_plan(sink, config, &options).await?;
+        self.execute_sync_plan(sink, config, plan, options).await
+    }
+
+    /// Executes replication from a pre-compiled plan with interactive progress tracking.
+    pub async fn execute_sync_plan(
+        &self,
+        sink: &dyn MetadataStorageSink,
+        _config: &DriveConfiguration,
+        plan: ReplicaSyncPlan,
+        options: ReplicaSyncOptions,
+    ) -> Result<ReplicaSyncReport, DeduplicationError> {
+        let start = Instant::now();
 
         if options.dry_run {
             return Ok(ReplicaSyncReport {
@@ -263,11 +312,58 @@ impl ReplicaSyncService {
         let mut bytes_transferred = 0u64;
         let mut errors = Vec::new();
         let mut new_replica_docs = Vec::new();
+        let mut successful_replications: Vec<(Uuid, String)> = Vec::new();
 
-        for task in &plan.tasks {
+        let total_tasks = plan.tasks.len();
+        let is_tty = std::io::stderr().is_terminal();
+        let pb = if is_tty {
+            let p = indicatif::ProgressBar::new(plan.total_bytes);
+            p.set_style(
+                indicatif::ProgressStyle::default_bar()
+                    .template("{spinner:.green} [{bar:28.cyan/blue}] {percent}% | {bytes}/{total_bytes} ({bytes_per_sec}) | Item {msg} | Elapsed: {elapsed} | ETA: {eta}")
+                    .unwrap_or_else(|_| indicatif::ProgressStyle::default_bar())
+                    .progress_chars("=> "),
+            );
+            p.enable_steady_tick(std::time::Duration::from_millis(150));
+            Some(p)
+        } else {
+            None
+        };
+
+        for (idx, task) in plan.tasks.iter().enumerate() {
+            let fname = task
+                .source_path
+                .file_name()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default();
+
+            if let Some(ref p) = pb {
+                p.set_message(format!(
+                    "{}/{} ({} -> {})",
+                    idx + 1,
+                    total_tasks,
+                    fname,
+                    task.replica_drive_id
+                ));
+            } else {
+                eprintln!(
+                    "[{}/{}] Replicating '{}' to {} ({:.1} MB)...",
+                    idx + 1,
+                    total_tasks,
+                    fname,
+                    task.replica_drive_id,
+                    task.file_size_bytes as f64 / (1024.0 * 1024.0)
+                );
+            }
+
             match task.status {
                 IngestTaskStatus::SkippedIdentical => {
                     files_skipped_identical += 1;
+                    if let Some(ref p) = pb {
+                        p.inc(task.file_size_bytes);
+                    }
+                    successful_replications
+                        .push((task.canonical_master_id, task.replica_drive_id.clone()));
                     let now = Utc::now();
                     let new_doc_id = Uuid::new_v4();
                     let rep_meta = DeduplicationMetadata {
@@ -280,6 +376,7 @@ impl ReplicaSyncService {
                         is_in_master_path: true,
                         reclaimable_bytes: 0,
                         evaluated_at: now,
+                        replication: None,
                     };
 
                     let master_doc = sink
@@ -340,18 +437,58 @@ impl ReplicaSyncService {
                     new_replica_docs.push(replica_doc);
                 }
                 IngestTaskStatus::Pending => {
+                    // Acquire exclusive spindle locks for source (primary) and target (replica) drives
+                    let _spindle_guard = self
+                        .spindle_locks
+                        .acquire_transfer_locks(&task.source_path, &task.target_path)
+                        .await;
+
+                    let mut buffer_config = options.buffer_config;
+                    if !options.verify_hash {
+                        buffer_config.in_flight_hash = false;
+                        buffer_config.recheck_disk_hash = false;
+                    }
+
                     match UnifiedFileTransferService::stream_copy_verified(
                         &task.source_path,
                         &task.target_path,
                         task.file_size_bytes,
                         task.cryptographic_hash.as_deref(),
-                        options.verify_hash,
+                        buffer_config,
                     )
                     .await
                     {
                         Ok(copied_bytes) => {
                             files_replicated += 1;
                             bytes_transferred += copied_bytes;
+                            if let Some(ref p) = pb {
+                                p.inc(copied_bytes);
+                            }
+
+                            // If a companion .AAE sidecar exists on primary master, replicate it alongside the media file
+                            match UnifiedFileTransferService::transfer_companion_sidecar_if_present(
+                                &task.source_path,
+                                &task.target_path,
+                                buffer_config,
+                                false, // Never delete from primary master
+                            )
+                            .await
+                            {
+                                Ok(sidecar_res) => {
+                                    if sidecar_res.found && !sidecar_res.skipped_identical {
+                                        bytes_transferred += sidecar_res.bytes_transferred;
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        source = %task.source_path.display(),
+                                        error = %e,
+                                        "Warning: Failed replicating companion .AAE sidecar"
+                                    );
+                                }
+                            }
+                            successful_replications
+                                .push((task.canonical_master_id, task.replica_drive_id.clone()));
 
                             let now = Utc::now();
                             let new_doc_id = Uuid::new_v4();
@@ -365,6 +502,7 @@ impl ReplicaSyncService {
                                 is_in_master_path: true,
                                 reclaimable_bytes: 0,
                                 evaluated_at: now,
+                                replication: None,
                             };
 
                             let master_doc = sink
@@ -426,6 +564,9 @@ impl ReplicaSyncService {
                         }
                         Err(e) => {
                             files_failed += 1;
+                            if let Some(ref p) = pb {
+                                p.inc(task.file_size_bytes);
+                            }
                             errors.push(format!("{}", e));
                         }
                     }
@@ -433,14 +574,58 @@ impl ReplicaSyncService {
                 IngestTaskStatus::CopiedVerified => {}
                 IngestTaskStatus::Failed(ref err) => {
                     files_failed += 1;
+                    if let Some(ref p) = pb {
+                        p.inc(task.file_size_bytes);
+                    }
                     errors.push(err.clone());
                 }
             }
         }
 
+        if let Some(ref p) = pb {
+            p.finish_and_clear();
+        }
+
         if !new_replica_docs.is_empty() {
             if let Err(e) = sink.save_batch(&new_replica_docs).await {
                 errors.push(format!("Failed saving replica records to database: {}", e));
+            }
+        }
+
+        // Update MasterReplicationState for each synchronized master
+        for (master_id, replica_drive_id) in &successful_replications {
+            if let Ok(Some(master_doc)) = sink.find_document_by_id(*master_id).await {
+                let mut rep_state = master_doc
+                    .dedup
+                    .as_ref()
+                    .and_then(|d| d.replication.clone())
+                    .unwrap_or_else(|| MasterReplicationState {
+                        status: ReplicationStatus::Pending,
+                        pending_drives: Vec::new(),
+                        replicated_drives: Vec::new(),
+                        last_synced_at: None,
+                    });
+
+                rep_state.pending_drives.retain(|d| d != replica_drive_id);
+                if !rep_state.replicated_drives.contains(replica_drive_id) {
+                    rep_state.replicated_drives.push(replica_drive_id.clone());
+                }
+                rep_state.last_synced_at = Some(Utc::now());
+                if rep_state.pending_drives.is_empty() {
+                    rep_state.status = ReplicationStatus::Replicated;
+                } else {
+                    rep_state.status = ReplicationStatus::PartiallyReplicated;
+                }
+
+                if let Err(e) = sink
+                    .update_master_replication_state(*master_id, &rep_state)
+                    .await
+                {
+                    errors.push(format!(
+                        "Failed updating replication state for master {}: {}",
+                        master_id, e
+                    ));
+                }
             }
         }
 

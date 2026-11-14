@@ -78,6 +78,26 @@ fn test_classify_raw_photos() {
 }
 
 #[test]
+fn test_classify_sidecar_aae() {
+    let classifier = PhfMediaClassifier::new();
+
+    assert_eq!(
+        classifier.classify(Path::new("IMG_1234.AAE")),
+        Some(MediaCategory::Sidecar)
+    );
+    assert_eq!(
+        classifier.classify(Path::new("folder/IMG_1234.aae")),
+        Some(MediaCategory::Sidecar)
+    );
+    assert_eq!(
+        classifier.classify(Path::new("IMG_E1234.Aae")),
+        Some(MediaCategory::Sidecar)
+    );
+    assert!(classifier.is_supported_extension("aae"));
+    assert!(classifier.is_supported_extension("AAE"));
+}
+
+#[test]
 fn test_classify_non_media() {
     let classifier = PhfMediaClassifier::new();
 

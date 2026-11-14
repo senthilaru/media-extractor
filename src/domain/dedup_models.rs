@@ -273,6 +273,14 @@ pub struct DeduplicationSummary {
     pub total_reclaimable_bytes: u64,
     pub tier_pruned_percentage: f64,
     pub elapsed_seconds: f64,
+    #[serde(default)]
+    pub canonical_masters_count: usize,
+    #[serde(default)]
+    pub replica_files_preserved: usize,
+    #[serde(default)]
+    pub needs_ingest_files: usize,
+    #[serde(default)]
+    pub conflict_review_files: usize,
 }
 
 /// Configuration options for fingerprint generation.
@@ -397,6 +405,36 @@ impl std::fmt::Display for DeduplicationStatus {
     }
 }
 
+/// Overall replication status of a canonical master asset across backup replica drives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ReplicationStatus {
+    Pending,
+    PartiallyReplicated,
+    Replicated,
+}
+
+impl std::fmt::Display for ReplicationStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Pending => write!(f, "Pending"),
+            Self::PartiallyReplicated => write!(f, "PartiallyReplicated"),
+            Self::Replicated => write!(f, "Replicated"),
+        }
+    }
+}
+
+/// Detailed replication tracking metadata for a canonical master asset.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MasterReplicationState {
+    pub status: ReplicationStatus,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_drives: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub replicated_drives: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_synced_at: Option<DateTime<Utc>>,
+}
+
 /// Deduplication metadata embedded inside MediaMetadataDocument in MongoDB.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeduplicationMetadata {
@@ -413,6 +451,8 @@ pub struct DeduplicationMetadata {
     pub is_in_master_path: bool,
     pub reclaimable_bytes: u64,
     pub evaluated_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replication: Option<MasterReplicationState>,
 }
 
 /// Canonical path matching evaluation result.
@@ -489,6 +529,114 @@ pub struct IngestOptions {
     pub dry_run: bool,
     pub delete_source: bool,
     pub verify_hash: bool,
+    pub buffer_config: TransferBufferConfig,
+}
+
+impl Default for IngestOptions {
+    fn default() -> Self {
+        Self {
+            source_drive: String::new(),
+            target_drive: None,
+            dry_run: false,
+            delete_source: false,
+            verify_hash: true,
+            buffer_config: TransferBufferConfig::default(),
+        }
+    }
+}
+
+/// Configuration for stream file transfer chunk buffer size and verification behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransferBufferConfig {
+    /// Buffer chunk size in bytes (default: 8 MB)
+    pub buffer_size_bytes: usize,
+    /// Whether in-flight stream hashing is enabled (default: true)
+    pub in_flight_hash: bool,
+    /// Whether to force a secondary post-copy disk re-read hash check (default: false)
+    pub recheck_disk_hash: bool,
+}
+
+impl Default for TransferBufferConfig {
+    fn default() -> Self {
+        Self {
+            buffer_size_bytes: 8 * 1024 * 1024, // 8 MB default for external HDDs
+            in_flight_hash: true,
+            recheck_disk_hash: false,
+        }
+    }
+}
+
+impl TransferBufferConfig {
+    pub const MIN_BUFFER_SIZE: usize = 64 * 1024; // 64 KB
+    pub const MAX_BUFFER_SIZE: usize = 32 * 1024 * 1024; // 32 MB
+
+    /// Creates a new `TransferBufferConfig` with bounded validation.
+    pub fn new(buffer_size_bytes: usize, in_flight_hash: bool, recheck_disk_hash: bool) -> Self {
+        let clamped = buffer_size_bytes.clamp(Self::MIN_BUFFER_SIZE, Self::MAX_BUFFER_SIZE);
+        Self {
+            buffer_size_bytes: clamped,
+            in_flight_hash,
+            recheck_disk_hash,
+        }
+    }
+
+    /// Computes the effective buffer allocation size for a specific file,
+    /// bounding memory to `min(file_size, buffer_size_bytes)`.
+    pub fn effective_buffer_size(&self, file_size: u64) -> usize {
+        if file_size == 0 {
+            Self::MIN_BUFFER_SIZE
+        } else {
+            let needed = file_size.min(self.buffer_size_bytes as u64) as usize;
+            needed.max(Self::MIN_BUFFER_SIZE)
+        }
+    }
+
+    /// Parses a human-readable size string (e.g. "4M", "8M", "16M", "512K", "8388608").
+    pub fn parse_size_str(s: &str) -> Result<usize, String> {
+        let trimmed = s.trim();
+        if trimmed.is_empty() {
+            return Ok(8 * 1024 * 1024);
+        }
+
+        let (num_part, multiplier) = if trimmed.ends_with("MB") || trimmed.ends_with("mb") {
+            (&trimmed[..trimmed.len() - 2], 1024 * 1024)
+        } else if trimmed.ends_with('M') || trimmed.ends_with('m') {
+            (&trimmed[..trimmed.len() - 1], 1024 * 1024)
+        } else if trimmed.ends_with("KB") || trimmed.ends_with("kb") {
+            (&trimmed[..trimmed.len() - 2], 1024)
+        } else if trimmed.ends_with('K') || trimmed.ends_with('k') {
+            (&trimmed[..trimmed.len() - 1], 1024)
+        } else if trimmed.ends_with("GB")
+            || trimmed.ends_with("gb")
+            || trimmed.ends_with('G')
+            || trimmed.ends_with('g')
+        {
+            return Err("Buffer size cannot exceed 32MB".to_string());
+        } else {
+            (trimmed, 1)
+        };
+
+        let val: usize = num_part
+            .trim()
+            .parse::<usize>()
+            .map_err(|e| format!("Invalid buffer size '{}': {}", s, e))?;
+
+        let bytes = val.saturating_mul(multiplier);
+        if bytes < Self::MIN_BUFFER_SIZE {
+            return Err(format!(
+                "Buffer size {} bytes is below minimum allowed limit of 64KB (65536 bytes)",
+                bytes
+            ));
+        }
+        if bytes > Self::MAX_BUFFER_SIZE {
+            return Err(format!(
+                "Buffer size {} bytes exceeds maximum allowed limit of 32MB (33554432 bytes)",
+                bytes
+            ));
+        }
+
+        Ok(bytes)
+    }
 }
 
 /// Summary report returned upon completion of an ingestion run.
@@ -503,6 +651,10 @@ pub struct IngestExecutionReport {
     pub files_failed: usize,
     pub bytes_transferred: u64,
     pub source_files_deleted: usize,
+    #[serde(default)]
+    pub duplicates_linked: usize,
+    #[serde(default)]
+    pub replication_pending_count: usize,
     pub elapsed_seconds: f64,
     pub errors: Vec<String>,
 }
@@ -557,5 +709,44 @@ pub struct ReplicaSyncReport {
     pub files_failed: usize,
     pub bytes_transferred: u64,
     pub elapsed_seconds: f64,
+    pub errors: Vec<String>,
+}
+
+/// Represents an identified pairing between a primary media file and an optional companion sidecar file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SidecarCompanionPair {
+    /// Absolute path to primary media file (photo/video)
+    pub primary_path: PathBuf,
+    /// Absolute path to companion sidecar file (if detected)
+    pub sidecar_path: Option<PathBuf>,
+    /// Extension of sidecar (e.g. "aae")
+    pub sidecar_extension: Option<String>,
+}
+
+/// Execution outcome of a sidecar companion transfer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct SidecarTransferResult {
+    /// Whether a companion sidecar was found
+    pub found: bool,
+    /// Source sidecar path
+    pub source_path: Option<PathBuf>,
+    /// Destination sidecar path
+    pub target_path: Option<PathBuf>,
+    /// Bytes transferred
+    pub bytes_transferred: u64,
+    /// Whether transfer was skipped (identical file already present)
+    pub skipped_identical: bool,
+    /// Error message if transfer failed
+    pub error: Option<String>,
+}
+
+/// Record of sidecars deleted during pruning.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct SidecarPruneResult {
+    /// Number of companion sidecar files deleted
+    pub sidecars_deleted: usize,
+    /// Bytes reclaimed from sidecars
+    pub bytes_reclaimed: u64,
+    /// Any errors encountered
     pub errors: Vec<String>,
 }

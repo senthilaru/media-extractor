@@ -3,7 +3,7 @@ use std::io::Write;
 use tempfile::tempdir;
 
 use metadata_extractor::application::transfer_service::UnifiedFileTransferService;
-use metadata_extractor::domain::dedup_models::PathResolution;
+use metadata_extractor::domain::dedup_models::{PathResolution, TransferBufferConfig};
 use metadata_extractor::domain::models::MediaCategory;
 use metadata_extractor::domain::ports::MediaFingerprinter;
 use metadata_extractor::infrastructure::blake3_hasher::Blake3MediaHasher;
@@ -98,7 +98,7 @@ async fn test_stream_copy_verified_success_and_hash_rollback() {
         &dst,
         payload.len() as u64,
         Some(&exp_hash),
-        true,
+        TransferBufferConfig::default(),
     )
     .await
     .unwrap();
@@ -113,10 +113,56 @@ async fn test_stream_copy_verified_success_and_hash_rollback() {
         &dst2,
         payload.len() as u64,
         Some("bad_hash_value_that_fails_verification"),
-        true,
+        TransferBufferConfig::default(),
     )
     .await;
 
     assert!(result.is_err());
     assert!(!dst2.exists(), "Corrupt or mismatch target must be purged");
+}
+
+#[test]
+fn test_find_companion_sidecar() {
+    let dir = tempdir().unwrap();
+
+    let img1 = dir.path().join("IMG_1001.HEIC");
+    let aae1 = dir.path().join("IMG_1001.AAE");
+    std::fs::write(&img1, b"heic_data").unwrap();
+    std::fs::write(&aae1, b"plist_data").unwrap();
+
+    // Exact stem match
+    let found = UnifiedFileTransferService::find_companion_sidecar(&img1);
+    assert_eq!(found, Some(aae1.clone()));
+
+    // Case-insensitive match .aae
+    let img2 = dir.path().join("IMG_1002.JPG");
+    let aae2 = dir.path().join("IMG_1002.aae");
+    std::fs::write(&img2, b"jpg_data").unwrap();
+    std::fs::write(&aae2, b"plist_data").unwrap();
+    let found2 = UnifiedFileTransferService::find_companion_sidecar(&img2);
+    assert_eq!(found2, Some(aae2));
+
+    // Apple edit variant: IMG_E1003.JPG -> IMG_1003.AAE
+    let img3 = dir.path().join("IMG_E1003.JPG");
+    let aae3 = dir.path().join("IMG_1003.AAE");
+    std::fs::write(&img3, b"edited_jpg").unwrap();
+    std::fs::write(&aae3, b"plist_data").unwrap();
+    let found3 = UnifiedFileTransferService::find_companion_sidecar(&img3);
+    assert_eq!(found3, Some(aae3));
+
+    // Video companion: IMG_1004.MOV -> IMG_1004.AAE
+    let vid4 = dir.path().join("IMG_1004.MOV");
+    let aae4 = dir.path().join("IMG_1004.AAE");
+    std::fs::write(&vid4, b"mov_data").unwrap();
+    std::fs::write(&aae4, b"plist_data").unwrap();
+    let found4 = UnifiedFileTransferService::find_companion_sidecar(&vid4);
+    assert_eq!(found4, Some(aae4));
+
+    // Non-existent sidecar returns None
+    let img_lone = dir.path().join("IMG_9999.JPG");
+    std::fs::write(&img_lone, b"lone").unwrap();
+    assert_eq!(
+        UnifiedFileTransferService::find_companion_sidecar(&img_lone),
+        None
+    );
 }

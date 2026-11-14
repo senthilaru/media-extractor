@@ -10,8 +10,7 @@ use crate::application::metadata_engine::MetadataExtractionEngine;
 use crate::application::progress_tracker::ProgressTracker;
 use crate::domain::metadata_models::MediaMetadataDocument;
 use crate::domain::ports::{
-    BatchMetadataExtractor, DirectoryScanner, MetadataStorageSink, ProgressReporter, ProgressSink,
-    ScanConfig,
+    DirectoryScanner, MetadataStorageSink, ProgressReporter, ProgressSink, ScanConfig,
 };
 use crate::domain::progress_models::{
     ExecutionSummary, ExtractionPerformanceProfile, OperationalPhase,
@@ -171,10 +170,18 @@ impl ExtractionPipeline {
                     items_to_extract,
                 );
 
+                let tracker_item = Arc::clone(&tracker_w);
                 tokio::spawn(async move {
-                    let docs = eng.extract_batch(extract_batch, Some(&root_clone)).await;
+                    let docs = eng
+                        .extract_batch_with_progress(
+                            extract_batch,
+                            Some(&root_clone),
+                            move |count, bytes| {
+                                tracker_item.record_processed(count, bytes);
+                            },
+                        )
+                        .await;
                     let docs_bytes: u64 = docs.iter().map(|d| d.file_context.file_size_bytes).sum();
-                    tracker_w.record_processed(docs.len() as u64, docs_bytes);
 
                     let _ = tx.send((docs, docs_bytes)).await;
                     drop(permit);
@@ -195,7 +202,10 @@ impl ExtractionPipeline {
                 break;
             }
 
-            if storage_sink.is_some() {
+            let snap = tracker_for_persist.snapshot();
+            if storage_sink.is_some()
+                && snap.items_processed + snap.items_skipped >= snap.items_discovered
+            {
                 tracker_for_persist.set_phase(OperationalPhase::Persistence);
             }
 

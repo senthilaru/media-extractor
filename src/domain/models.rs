@@ -12,6 +12,7 @@ pub enum MediaCategory {
     Photo,
     Video,
     RawPhoto,
+    Sidecar,
 }
 
 impl std::fmt::Display for MediaCategory {
@@ -20,6 +21,7 @@ impl std::fmt::Display for MediaCategory {
             Self::Photo => write!(f, "Photo"),
             Self::Video => write!(f, "Video"),
             Self::RawPhoto => write!(f, "RawPhoto"),
+            Self::Sidecar => write!(f, "Sidecar"),
         }
     }
 }

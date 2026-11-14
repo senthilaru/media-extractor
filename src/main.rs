@@ -8,11 +8,14 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use metadata_extractor::application::drive_pruner::{DrivePrunerOptions, DrivePruningService};
 use metadata_extractor::application::engine::ScanEngine;
 use metadata_extractor::application::ingest_service::MasterIngestService;
+use metadata_extractor::application::organize_service::{
+    OrganizePipelineOptions, OrganizePipelineService,
+};
 use metadata_extractor::application::pipeline::ExtractionPipeline;
 use metadata_extractor::application::MetadataExtractionEngine;
 use metadata_extractor::domain::dedup_models::{
     DeduplicationConfig, DeduplicationMetadata, DeduplicationSummary, DuplicateCluster,
-    FingerprintConfig, IngestOptions, MediaFingerprint,
+    FingerprintConfig, IngestOptions, MediaFingerprint, TransferBufferConfig,
 };
 use metadata_extractor::domain::metadata_models::{
     AppProfile, DatabaseSinkConfig, MediaMetadataDocument,
@@ -137,6 +140,74 @@ enum Commands {
     /// Synchronize canonical master assets from primary master to configured replica drives
     #[command(alias = "replicate", alias = "replica-sync")]
     SyncReplicas(SyncReplicasArgs),
+
+    /// Run the unified end-to-end media organization pipeline (extract -> dedup -> ingest -> sync-replicas -> prune)
+    #[command(alias = "archive", alias = "pipeline")]
+    Organize(OrganizeArgs),
+}
+
+#[derive(Parser, Debug)]
+struct OrganizeArgs {
+    /// Source drive ID, external mount path, or directory containing unorganized media
+    #[arg(short = 's', long, required = true)]
+    source: PathBuf,
+
+    /// Path to drive configuration YAML file
+    #[arg(
+        short = 'c',
+        long,
+        default_value = "drives.yaml",
+        env = "MEDIA_DRIVES_CONFIG"
+    )]
+    config: PathBuf,
+
+    /// Preview planned operations across all stages without copying or deleting files
+    #[arg(long, default_value_t = false)]
+    dry_run: bool,
+
+    /// Ingest and replicate to backups, but skip pruning source files
+    #[arg(long, default_value_t = false)]
+    skip_prune: bool,
+
+    /// Skip secondary BLAKE3 cryptographic hash verification during copy
+    #[arg(long, default_value_t = false)]
+    no_verify_hash: bool,
+
+    /// I/O transfer buffer size for stream copies (e.g., '4M', '8M', '16M', default: '8M')
+    #[arg(long, default_value = "8M")]
+    buffer_size: String,
+
+    /// Force a secondary disk re-read pass to verify destination hash
+    #[arg(long, default_value_t = false)]
+    recheck_disk_hash: bool,
+
+    /// Force complete re-extraction of all files during metadata scanning
+    #[arg(long, default_value_t = false)]
+    force: bool,
+
+    /// Batch size for discovery and extraction
+    #[arg(short = 'b', long, default_value_t = 500)]
+    batch_size: usize,
+
+    /// Backpressure channel capacity
+    #[arg(long, default_value_t = 100)]
+    channel_capacity: usize,
+
+    /// MongoDB connection URI override
+    #[arg(long, visible_alias = "db-uri", env = "MONGODB_URI")]
+    mongodb_uri: Option<String>,
+
+    /// Target collection name override
+    #[arg(long, visible_alias = "db-collection", env = "MONGODB_COLLECTION")]
+    collection: Option<String>,
+
+    /// Output format
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    format: OutputFormat,
+
+    /// Suppress non-essential progress telemetry
+    #[arg(short = 'q', long, default_value_t = false)]
+    quiet: bool,
 }
 
 #[derive(Parser, Debug)]
@@ -165,6 +236,14 @@ struct SyncReplicasArgs {
     /// Skip BLAKE3 cryptographic hash verification of copied destination files
     #[arg(long, default_value_t = false)]
     no_verify_hash: bool,
+
+    /// I/O transfer buffer size for stream copies (e.g., '4M', '8M', '16M', default: '8M')
+    #[arg(long, default_value = "8M")]
+    buffer_size: String,
+
+    /// Force a secondary disk re-read pass to verify destination hash (default: false, in-flight verify used)
+    #[arg(long, default_value_t = false)]
+    recheck_disk_hash: bool,
 
     /// MongoDB connection URI override
     #[arg(long, visible_alias = "db-uri", env = "MONGODB_URI")]
@@ -217,6 +296,14 @@ struct IngestArgs {
     /// Skip BLAKE3 cryptographic hash verification of copied destination files
     #[arg(long, default_value_t = false)]
     no_verify_hash: bool,
+
+    /// I/O transfer buffer size for stream copies (e.g., '4M', '8M', '16M', default: '8M')
+    #[arg(long, default_value = "8M")]
+    buffer_size: String,
+
+    /// Force a secondary disk re-read pass to verify destination hash (default: false, in-flight verify used)
+    #[arg(long, default_value_t = false)]
+    recheck_disk_hash: bool,
 
     /// MongoDB connection URI override
     #[arg(long, visible_alias = "db-uri", env = "MONGODB_URI")]
@@ -535,6 +622,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Commands::DedupStream(args) => run_dedup_stream(args).await?,
             Commands::Ingest(args) => run_ingest(args).await?,
             Commands::SyncReplicas(args) => run_sync_replicas(args).await?,
+            Commands::Organize(args) => run_organize_cli(args).await?,
         }
     } else if let Some(path) = cli.path {
         let args = ExtractArgs {
@@ -1044,11 +1132,31 @@ async fn run_database_dedup_cli(
         println!("Mode:                      Database-Driven Exact Bitwise");
         println!("Total Records Evaluated:   {}", summary.total_files_scanned);
         println!(
+            "Canonical Masters:         {}",
+            summary.canonical_masters_count
+        );
+        println!(
+            "Replica Backups Preserved: {} (Protected - ReplicaKeep)",
+            summary.replica_files_preserved
+        );
+        if summary.needs_ingest_files > 0 {
+            println!(
+                "Pending Ingest to Master:  {} (Run 'ingest' to organize)",
+                summary.needs_ingest_files
+            );
+        }
+        if summary.conflict_review_files > 0 {
+            println!(
+                "Conflict Review Required:  {} (Multiple copies in master)",
+                summary.conflict_review_files
+            );
+        }
+        println!(
             "Duplicate Clusters Found:  {}",
             summary.duplicate_clusters_count
         );
         println!(
-            "Total Redundant Files:     {}",
+            "Total Redundant Files:     {} (Marked for removal)",
             summary.exact_duplicate_files
         );
         println!(
@@ -1077,6 +1185,16 @@ async fn run_database_dedup_cli(
 
 async fn run_dedup_prune(args: PruneArgs) -> Result<(), Box<dyn std::error::Error>> {
     let drive_config = DrivesConfigLoader::load_from_env_or_path(Some(&args.config))?;
+
+    // Fail-fast protection guard check before database connection or disk operations
+    let guard =
+        metadata_extractor::infrastructure::archive_guard::ArchiveProtectionGuard::from_config(
+            &drive_config,
+        );
+    if let Err(e) = guard.validate_prune_target(&args.drive, &drive_config) {
+        eprintln!("Error: {}", e);
+        std::process::exit(1);
+    }
 
     let db_config = resolve_db_config(args.mongodb_uri, args.collection);
     let sink = match MongoDbStorageSink::connect(db_config.clone()).await {
@@ -1114,8 +1232,13 @@ async fn run_dedup_prune(args: PruneArgs) -> Result<(), Box<dyn std::error::Erro
             report.bytes_reclaimed,
             report.bytes_reclaimed as f64 / (1024.0 * 1024.0 * 1024.0)
         );
+        println!(
+            "Empty Directories Eligible:    {}",
+            report.empty_directories_eligible
+        );
+        println!("Database Records to Purge:     {}", report.records_purged);
         println!();
-        println!("Zero files were deleted. Re-run with `--execute` to delete redundant copies.");
+        println!("Zero files were deleted. Re-run with `--execute` to delete redundant copies and purge obsolete database records.");
     } else {
         println!(
             "[EXECUTED] Pruned redundant duplicates on drive: {} ({})",
@@ -1123,6 +1246,11 @@ async fn run_dedup_prune(args: PruneArgs) -> Result<(), Box<dyn std::error::Erro
             report.mount_path.display()
         );
         println!("Files Deleted:                 {}", report.files_deleted);
+        println!(
+            "Empty Directories Removed:     {}",
+            report.empty_directories_removed
+        );
+        println!("Database Records Purged:       {}", report.records_purged);
         println!(
             "Storage Space Reclaimed:       {} bytes ({:.2} GB)",
             report.bytes_reclaimed,
@@ -1442,6 +1570,22 @@ async fn run_ingest(args: IngestArgs) -> Result<(), Box<dyn std::error::Error>> 
         }
     };
 
+    let buffer_size_bytes = match TransferBufferConfig::parse_size_str(&args.buffer_size) {
+        Ok(sz) => sz,
+        Err(err) => {
+            eprintln!(
+                "Warning: Invalid --buffer-size '{}': {}. Falling back to 8MB.",
+                args.buffer_size, err
+            );
+            8 * 1024 * 1024
+        }
+    };
+    let buffer_config = TransferBufferConfig::new(
+        buffer_size_bytes,
+        !args.no_verify_hash,
+        args.recheck_disk_hash,
+    );
+
     let service = MasterIngestService::new();
     let options = IngestOptions {
         source_drive: args.source_drive,
@@ -1449,10 +1593,12 @@ async fn run_ingest(args: IngestArgs) -> Result<(), Box<dyn std::error::Error>> 
         dry_run: args.dry_run,
         delete_source: args.delete_source,
         verify_hash: !args.no_verify_hash,
+        buffer_config,
     };
 
+    let plan = service.compile_plan(&sink, &drive_config, &options).await?;
+
     if args.dry_run {
-        let plan = service.compile_plan(&sink, &drive_config, &options).await?;
         if args.format == OutputFormat::Json {
             println!("{}", serde_json::to_string_pretty(&plan)?);
         } else {
@@ -1503,8 +1649,17 @@ async fn run_ingest(args: IngestArgs) -> Result<(), Box<dyn std::error::Error>> 
         return Ok(());
     }
 
+    if !args.quiet && !plan.tasks.is_empty() {
+        eprintln!(
+            "Ingesting {} unmastered files ({:.2} GB) into primary master (drive: {})...",
+            plan.tasks.len(),
+            plan.total_bytes as f64 / (1024.0 * 1024.0 * 1024.0),
+            plan.target_drive_id
+        );
+    }
+
     let report = service
-        .execute_ingest(&sink, &drive_config, options)
+        .execute_ingest_plan(&sink, &drive_config, plan, options)
         .await?;
 
     if args.format == OutputFormat::Json {
@@ -1542,13 +1697,24 @@ async fn run_ingest(args: IngestArgs) -> Result<(), Box<dyn std::error::Error>> 
         println!("Database Updates:");
         println!(
             "  - Canonical Masters Created: {} (Registered on {})",
-            report.files_transferred, report.target_drive_id
+            report.files_transferred + report.files_skipped_identical,
+            report.target_drive_id
+        );
+        println!(
+            "  - Duplicate Records Linked:  {} (Updated with canonical master ID & path)",
+            report.duplicates_linked
         );
         println!(
             "  - Source Files Marked:       {} (Updated to 'MarkForRemoval' on {})",
             report.files_transferred + report.files_skipped_identical,
             report.source_drive_id
         );
+        if report.replication_pending_count > 0 {
+            println!(
+                "Replication Status:            {} new master assets pending replication",
+                report.replication_pending_count
+            );
+        }
         if args.delete_source {
             println!(
                 "Source Files on Disk:  Deleted {} source files from disk.",
@@ -1565,6 +1731,15 @@ async fn run_ingest(args: IngestArgs) -> Result<(), Box<dyn std::error::Error>> 
             for err in &report.errors {
                 println!("  - {}", err);
             }
+        }
+        if report.files_transferred == 0 && report.files_skipped_identical == 0 {
+            println!();
+            println!("Notice: 0 files were transferred because no media assets on '{}'", report.source_drive_id);
+            println!("were marked with status 'NeedsIngestToMaster' in MongoDB.");
+            println!("  - To automatically scan, catalog, deduplicate, and ingest unmastered files");
+            println!("    (including companion .AAE sidecars) directly from this folder, run:");
+            println!("      cargo run -- organize --source \"{}\" --config \"{}\" --skip-prune", report.source_drive_id, args.config.display());
+            println!("  - Or run `extract-stream` followed by `dedup` to update database statuses before running `ingest`.");
         }
         println!(
             "================================================================================"
@@ -1585,6 +1760,7 @@ async fn run_ingest(args: IngestArgs) -> Result<(), Box<dyn std::error::Error>> 
             primary_drive_id: Some(report.target_drive_id.clone()),
             dry_run: false,
             verify_hash: !args.no_verify_hash,
+            buffer_config,
         };
 
         let rep_report = rep_service
@@ -1648,16 +1824,34 @@ async fn run_sync_replicas(args: SyncReplicasArgs) -> Result<(), Box<dyn std::er
         }
     };
 
+    let buffer_size_bytes = match TransferBufferConfig::parse_size_str(&args.buffer_size) {
+        Ok(sz) => sz,
+        Err(err) => {
+            eprintln!(
+                "Warning: Invalid --buffer-size '{}': {}. Falling back to 8MB.",
+                args.buffer_size, err
+            );
+            8 * 1024 * 1024
+        }
+    };
+    let buffer_config = TransferBufferConfig::new(
+        buffer_size_bytes,
+        !args.no_verify_hash,
+        args.recheck_disk_hash,
+    );
+
     let service = metadata_extractor::application::replica_service::ReplicaSyncService::new();
     let options = metadata_extractor::application::replica_service::ReplicaSyncOptions {
         target_replica_id: args.replica,
         primary_drive_id: args.primary,
         dry_run: args.dry_run,
         verify_hash: !args.no_verify_hash,
+        buffer_config,
     };
 
+    let plan = service.compile_plan(&sink, &drive_config, &options).await?;
+
     if args.dry_run {
-        let plan = service.compile_plan(&sink, &drive_config, &options).await?;
         if args.format == OutputFormat::Json {
             println!("{}", serde_json::to_string_pretty(&plan)?);
         } else {
@@ -1711,7 +1905,23 @@ async fn run_sync_replicas(args: SyncReplicasArgs) -> Result<(), Box<dyn std::er
         return Ok(());
     }
 
-    let report = service.execute_sync(&sink, &drive_config, options).await?;
+    if !args.quiet && !plan.tasks.is_empty() {
+        eprintln!(
+            "Synchronizing {} replica files ({:.2} GB) from primary '{}' to active replicas ({})...",
+            plan.tasks.len(),
+            plan.total_bytes as f64 / (1024.0 * 1024.0 * 1024.0),
+            plan.primary_drive_id,
+            if plan.active_replica_ids.is_empty() {
+                "None".to_string()
+            } else {
+                plan.active_replica_ids.join(", ")
+            }
+        );
+    }
+
+    let report = service
+        .execute_sync_plan(&sink, &drive_config, plan, options)
+        .await?;
 
     if args.format == OutputFormat::Json {
         println!("{}", serde_json::to_string_pretty(&report)?);
@@ -1751,12 +1961,138 @@ async fn run_sync_replicas(args: SyncReplicasArgs) -> Result<(), Box<dyn std::er
             report.bytes_transferred as f64 / (1024.0 * 1024.0)
         );
         println!("Elapsed Time:          {:.3}s", report.elapsed_seconds);
+        println!(
+            "--------------------------------------------------------------------------------"
+        );
+        println!("Database Updates:");
+        println!(
+            "  - Replica Records Created:   {} (Status: 'ReplicaKeep')",
+            report.files_replicated + report.files_skipped_identical
+        );
+        println!(
+            "  - Master Records Updated:    {} (Replication states refreshed)",
+            report.files_replicated + report.files_skipped_identical
+        );
         if !report.errors.is_empty() {
             println!("Errors / Warnings encountered: {}", report.errors.len());
             for err in &report.errors {
                 println!("  - {}", err);
             }
         }
+        println!(
+            "================================================================================"
+        );
+    }
+
+    Ok(())
+}
+
+async fn run_organize_cli(args: OrganizeArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let drive_config = DrivesConfigLoader::load_from_env_or_path(Some(&args.config))?;
+    let db_config = resolve_db_config(args.mongodb_uri, args.collection);
+
+    if !args.quiet {
+        eprintln!("Connecting to MongoDB at {}...", db_config.sanitized_uri());
+    }
+
+    let sink = match MongoDbStorageSink::connect(db_config.clone()).await {
+        Ok(s) => std::sync::Arc::new(s) as std::sync::Arc<dyn MetadataStorageSink>,
+        Err(e) => {
+            eprintln!("Database error: {}", e);
+            std::process::exit(3);
+        }
+    };
+
+    let _ = sink.ensure_indexes().await;
+
+    let options = OrganizePipelineOptions {
+        source_path: args.source,
+        dry_run: args.dry_run,
+        skip_prune: args.skip_prune,
+        no_verify_hash: args.no_verify_hash,
+        buffer_size: args.buffer_size,
+        recheck_disk_hash: args.recheck_disk_hash,
+        force_reindex: args.force,
+        batch_size: args.batch_size,
+        channel_capacity: args.channel_capacity,
+        quiet: args.quiet,
+    };
+
+    let service = OrganizePipelineService::new();
+    let report = service.execute(&sink, &drive_config, options).await?;
+
+    if args.format == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!();
+        println!(
+            "================================================================================"
+        );
+        println!("MEDIA ORGANIZATION PIPELINE: FINAL SUMMARY");
+        println!(
+            "================================================================================"
+        );
+        println!(
+            "Source Directory:          {}",
+            report.source_path.display()
+        );
+        println!(
+            "Configuration:             {} ({} groups, {} drives)",
+            args.config.display(),
+            drive_config.groups.len(),
+            drive_config.drives.len()
+        );
+        println!(
+            "Mode:                      {}",
+            if report.is_dry_run {
+                "DRY-RUN (Preview Only - No Files Modified)"
+            } else {
+                "EXECUTION (Live Disk Updates)"
+            }
+        );
+        println!("Total Files Extracted:     {}", report.files_extracted);
+        println!(
+            "Canonical Masters in DB:   {}",
+            report.canonical_masters_count
+        );
+        println!("Replica Backups Preserved: {}", report.replicas_preserved);
+        println!(
+            "New Masters Ingested:      {} files ({:.2} MB)",
+            report.files_ingested,
+            report.bytes_ingested as f64 / (1024.0 * 1024.0)
+        );
+        println!(
+            "Replica Backups Mirrored:  {} files ({:.2} MB)",
+            report.files_replicated,
+            report.bytes_replicated as f64 / (1024.0 * 1024.0)
+        );
+        println!(
+            "Redundant Files Pruned:    {} files ({:.2} MB)",
+            report.files_pruned,
+            report.bytes_reclaimed as f64 / (1024.0 * 1024.0)
+        );
+        println!(
+            "Empty Directories Removed: {}",
+            report.empty_directories_removed
+        );
+        println!(
+            "Total Elapsed Time:        {:.3}s",
+            report.total_elapsed_seconds
+        );
+        println!(
+            "--------------------------------------------------------------------------------"
+        );
+        println!("Stage Breakdown:");
+        for (stage, duration) in &report.stage_durations {
+            println!("  - {:<28} {:.3}s", stage, duration);
+        }
+        if !report.errors.is_empty() {
+            println!("Errors / Warnings:         {}", report.errors.len());
+            for err in &report.errors {
+                println!("  - {}", err);
+            }
+        }
+        println!("Status:                    SUCCESS");
         println!(
             "================================================================================"
         );

@@ -43,6 +43,9 @@ static EXTENSION_MAP: phf::Map<&'static str, MediaCategory> = phf_map! {
     "pef" => MediaCategory::RawPhoto,
     "raf" => MediaCategory::RawPhoto,
     "srw" => MediaCategory::RawPhoto,
+
+    // Edit sidecar metadata formats
+    "aae" => MediaCategory::Sidecar,
 };
 
 /// High-performance media classifier with zero heap allocations on the hot path.

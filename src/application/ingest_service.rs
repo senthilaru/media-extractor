@@ -1,4 +1,5 @@
 use chrono::Utc;
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 use uuid::Uuid;
@@ -8,23 +9,32 @@ use crate::application::transfer_service::UnifiedFileTransferService;
 use crate::domain::dedup_models::{
     DeduplicationMetadata, DeduplicationStatus, DriveConfiguration, DriveDefinition,
     IngestExecutionReport, IngestOptions, IngestTask, IngestTaskStatus, MasterIngestPlan,
-    MediaFingerprint, PathResolution,
+    MasterReplicationState, MediaFingerprint, PathResolution, ReplicationStatus,
+    TransferBufferConfig,
 };
 use crate::domain::errors::DeduplicationError;
 use crate::domain::metadata_models::{FileContext, MediaMetadataDocument};
 use crate::domain::models::MediaCategory;
-use crate::domain::ports::MetadataStorageSink;
+use crate::domain::ports::{MediaClassifier, MetadataStorageSink};
+use crate::infrastructure::archive_guard::ArchiveProtectionGuard;
 use crate::infrastructure::blake3_hasher::Blake3MediaHasher;
+use crate::infrastructure::drive_spindle_lock::DriveSpindleLockManager;
 use crate::infrastructure::drives_config::CanonicalPathMatcher;
 
 /// Service orchestrating safe, bitwise-verified ingestion of unmastered media assets
 /// into the primary drive's canonical master folder hierarchy.
 #[derive(Debug, Default, Clone)]
-pub struct MasterIngestService;
+pub struct MasterIngestService {
+    spindle_locks: DriveSpindleLockManager,
+}
 
 impl MasterIngestService {
     pub fn new() -> Self {
-        Self
+        Self::default()
+    }
+
+    pub fn with_spindle_locks(spindle_locks: DriveSpindleLockManager) -> Self {
+        Self { spindle_locks }
     }
 
     /// Formats calendar components into `<Year>` and `<DD-Mon-YYYY>` folder name.
@@ -47,16 +57,26 @@ impl MasterIngestService {
         }
     }
 
-    /// Asynchronously streams file contents from source to destination using a 1MB bounded buffer.
+    /// Asynchronously streams file contents from source to destination using a tuned bounded buffer.
     pub async fn stream_copy_file(source: &Path, target: &Path) -> Result<u64, DeduplicationError> {
         let size = std::fs::metadata(source).map(|m| m.len()).unwrap_or(0);
-        UnifiedFileTransferService::stream_copy_verified(source, target, size, None, false).await
+        UnifiedFileTransferService::stream_copy_verified(
+            source,
+            target,
+            size,
+            None,
+            TransferBufferConfig::default(),
+        )
+        .await
     }
 
-    /// Resolves source and target primary drive definitions.
+    /// Resolves source and target master drive definitions.
     ///
     /// The source drive can be any external drive mount path, local directory path, or
     /// configured drive ID/path without requiring pre-configuration in `drives.yaml`.
+    ///
+    /// When `target_identifier` is omitted, the highest priority drive currently mounted on disk
+    /// is chosen (supporting either primary or secondary drives without requiring both to be connected).
     pub fn resolve_drives<'a>(
         config: &'a DriveConfiguration,
         source_identifier: &str,
@@ -65,26 +85,44 @@ impl MasterIngestService {
         let source_drive = DrivePruningService::resolve_drive_or_path(config, source_identifier)?;
 
         let target_drive = if let Some(target_id) = target_identifier {
-            DrivePruningService::resolve_drive(config, target_id).ok_or_else(|| {
-                DeduplicationError::ConfigError(format!(
-                    "Target primary drive '{}' not found in configuration",
-                    target_id
-                ))
-            })?
+            DrivePruningService::resolve_drive(config, target_id)
+                .or_else(|| {
+                    config
+                        .drives
+                        .iter()
+                        .find(|d| d.group.eq_ignore_ascii_case(target_id))
+                })
+                .ok_or_else(|| {
+                    DeduplicationError::ConfigError(format!(
+                        "Target master drive '{}' not found in configuration",
+                        target_id
+                    ))
+                })?
         } else {
-            // Find highest-priority drive in primary group
-            let primary_drives: Vec<&DriveDefinition> = config
-                .drives
-                .iter()
-                .filter(|d| d.group.eq_ignore_ascii_case("primary"))
-                .collect();
-
-            if primary_drives.is_empty() {
+            if config.drives.is_empty() {
                 return Err(DeduplicationError::ConfigError(
-                    "No drive with group 'primary' configured in drives.yaml".to_string(),
+                    "No drives configured in drives.yaml".to_string(),
                 ));
             }
-            primary_drives[0]
+
+            // Rank configured drives by group priority descending
+            let mut candidates: Vec<&DriveDefinition> = config.drives.iter().collect();
+            candidates.sort_by(|a, b| {
+                let prio_a = config.groups.get(&a.group).map(|g| g.priority).unwrap_or(0);
+                let prio_b = config.groups.get(&b.group).map(|g| g.priority).unwrap_or(0);
+                prio_b.cmp(&prio_a).then_with(|| a.id.cmp(&b.id))
+            });
+
+            // Find first drive that is currently mounted on disk
+            let mounted = candidates.iter().copied().find(|d| d.mount_path.exists());
+
+            match mounted {
+                Some(drive) => drive,
+                None => {
+                    // Fall back to highest priority candidate so caller can emit DriveNotMounted
+                    candidates[0]
+                }
+            }
         };
 
         Ok((source_drive, target_drive))
@@ -124,7 +162,17 @@ impl MasterIngestService {
             .query_unmastered_candidates(Some(&source_mount_str))
             .await?;
 
-        let mut tasks = Vec::with_capacity(unmastered_docs.len());
+        let canonical_masters = if unmastered_docs
+            .iter()
+            .any(|d| d.file_context.media_category == MediaCategory::Sidecar)
+        {
+            sink.query_canonical_masters().await.unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+
+        let matcher = CanonicalPathMatcher::new(config.clone());
+        let mut tasks: Vec<IngestTask> = Vec::with_capacity(unmastered_docs.len());
         let mut total_bytes = 0u64;
         let hasher = Blake3MediaHasher::new();
 
@@ -141,13 +189,95 @@ impl MasterIngestService {
                 (2026, 1, 1)
             };
 
-            let rel_path = UnifiedFileTransferService::build_canonical_relative_path(
-                year,
-                month,
-                day,
-                cat,
-                &doc.file_context.file_name,
-            );
+            // If this item is a Sidecar (.aae), check if its companion is in current batch, existing masters, or on disk
+            let mut resolved_rel_path = None;
+            if cat == MediaCategory::Sidecar {
+                let stem = Path::new(&doc.file_context.file_name)
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or_default();
+
+                // Check 1: Companion in current plan tasks (being ingested in same batch)
+                for task in &tasks {
+                    if let Some(task_stem) = task.source_path.file_stem().and_then(|s| s.to_str()) {
+                        if UnifiedFileTransferService::is_apple_sidecar_stem_match(task_stem, stem) {
+                            if let Some(task_parent) = task.target_path.parent() {
+                                if let Ok(rel_parent) = task_parent.strip_prefix(&target_drive.master_path) {
+                                    let sidecar_name = format!("{}.{}", task_stem, doc.file_context.extension);
+                                    resolved_rel_path = Some(rel_parent.join(sidecar_name));
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Check 2: Companion in existing CanonicalMaster database catalog
+                if resolved_rel_path.is_none() {
+                    for master in &canonical_masters {
+                        let master_stem = Path::new(&master.file_context.file_name)
+                            .file_stem()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or_default();
+                        if UnifiedFileTransferService::is_apple_sidecar_stem_match(master_stem, stem) {
+                            let master_path = &master.file_context.file_path;
+                            let rel_opt = if let Ok(rel) = master_path.strip_prefix(&target_drive.master_path) {
+                                rel.parent().map(|p| p.to_path_buf())
+                            } else if let Some(drive) = matcher.find_drive_for_path(master_path) {
+                                master_path
+                                    .strip_prefix(&drive.master_path)
+                                    .ok()
+                                    .and_then(|rel| rel.parent().map(|p| p.to_path_buf()))
+                            } else {
+                                None
+                            };
+
+                            if let Some(rel_parent) = rel_opt {
+                                let sidecar_name = format!("{}.{}", master_stem, doc.file_context.extension);
+                                resolved_rel_path = Some(rel_parent.join(sidecar_name));
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                // Check 3: Companion media file on disk beside this sidecar
+                if resolved_rel_path.is_none() {
+                    if let Some(comp_path) =
+                        UnifiedFileTransferService::find_companion_media_file(&doc.file_context.file_path)
+                    {
+                        let comp_cat = crate::infrastructure::classifier::PhfMediaClassifier::new()
+                            .classify(&comp_path)
+                            .unwrap_or(MediaCategory::Photo);
+                        let comp_stem = comp_path
+                            .file_stem()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or(stem);
+                        let sidecar_name = format!("{}.{}", comp_stem, doc.file_context.extension);
+                        let cat_folder = UnifiedFileTransferService::category_folder_name(comp_cat);
+                        let (y, date_folder) =
+                            UnifiedFileTransferService::format_date_folder(year, month, day);
+                        resolved_rel_path = Some(
+                            PathBuf::from(format!("{}", y))
+                                .join(date_folder)
+                                .join(cat_folder)
+                                .join(sidecar_name),
+                        );
+                    }
+                }
+            }
+
+            let rel_path = if let Some(p) = resolved_rel_path {
+                p
+            } else {
+                UnifiedFileTransferService::build_canonical_relative_path(
+                    year,
+                    month,
+                    day,
+                    cat,
+                    &doc.file_context.file_name,
+                )
+            };
 
             let initial_target_path = target_drive.master_path.join(&rel_path);
 
@@ -203,8 +333,19 @@ impl MasterIngestService {
         config: &DriveConfiguration,
         options: IngestOptions,
     ) -> Result<IngestExecutionReport, DeduplicationError> {
-        let start = Instant::now();
         let plan = self.compile_plan(sink, config, &options).await?;
+        self.execute_ingest_plan(sink, config, plan, options).await
+    }
+
+    /// Executes ingestion from a pre-compiled plan with interactive progress tracking.
+    pub async fn execute_ingest_plan(
+        &self,
+        sink: &dyn MetadataStorageSink,
+        config: &DriveConfiguration,
+        plan: MasterIngestPlan,
+        options: IngestOptions,
+    ) -> Result<IngestExecutionReport, DeduplicationError> {
+        let start = Instant::now();
 
         if options.dry_run {
             return Ok(IngestExecutionReport {
@@ -221,12 +362,15 @@ impl MasterIngestService {
                 files_failed: 0,
                 bytes_transferred: 0,
                 source_files_deleted: 0,
+                duplicates_linked: 0,
+                replication_pending_count: 0,
                 elapsed_seconds: start.elapsed().as_secs_f64(),
                 errors: Vec::new(),
             });
         }
 
         let matcher = CanonicalPathMatcher::new(config.clone());
+        let guard = ArchiveProtectionGuard::from_config(config);
         let mut files_transferred = 0usize;
         let mut files_skipped_identical = 0usize;
         let mut files_failed = 0usize;
@@ -234,26 +378,127 @@ impl MasterIngestService {
         let mut source_files_deleted = 0usize;
         let mut errors = Vec::new();
 
+        let total_tasks = plan.tasks.len();
+        let is_tty = std::io::stderr().is_terminal();
+        let pb = if is_tty {
+            let p = indicatif::ProgressBar::new(plan.total_bytes);
+            p.set_style(
+                indicatif::ProgressStyle::default_bar()
+                    .template("{spinner:.green} [{bar:28.cyan/blue}] {percent}% | {bytes}/{total_bytes} ({bytes_per_sec}) | Item {msg} | Elapsed: {elapsed} | ETA: {eta}")
+                    .unwrap_or_else(|_| indicatif::ProgressStyle::default_bar())
+                    .progress_chars("=> "),
+            );
+            p.enable_steady_tick(std::time::Duration::from_millis(150));
+            Some(p)
+        } else {
+            None
+        };
+
+        let target_drive = DrivePruningService::resolve_drive(config, &plan.target_drive_id);
+        let target_group = target_drive
+            .as_ref()
+            .map(|d| d.group.clone())
+            .unwrap_or_else(|| "primary".to_string());
+
+        let configured_replica_drives: Vec<String> = config
+            .drives
+            .iter()
+            .filter(|d| {
+                d.id != plan.target_drive_id
+                    && (d.group.starts_with("replica")
+                        || d.group.eq_ignore_ascii_case("secondary"))
+            })
+            .map(|d| d.id.clone())
+            .collect();
+
         let mut source_updates: Vec<(Uuid, DeduplicationMetadata)> = Vec::new();
         let mut new_master_docs: Vec<MediaMetadataDocument> = Vec::new();
         let mut master_links: Vec<(String, Uuid, PathBuf)> = Vec::new();
 
-        for task in &plan.tasks {
+        for (idx, task) in plan.tasks.iter().enumerate() {
+            let fname = task
+                .source_path
+                .file_name()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default();
+
+            if let Some(ref p) = pb {
+                p.set_message(format!("{}/{} ({})", idx + 1, total_tasks, fname));
+            } else {
+                eprintln!(
+                    "[{}/{}] Ingesting '{}' ({:.1} MB)...",
+                    idx + 1,
+                    total_tasks,
+                    fname,
+                    task.file_size_bytes as f64 / (1024.0 * 1024.0)
+                );
+            }
+
             match task.status {
                 IngestTaskStatus::SkippedIdentical => {
                     files_skipped_identical += 1;
+                    if let Some(ref p) = pb {
+                        p.inc(task.file_size_bytes);
+                    }
+
+                    // Even when the primary media file already exists in master (SkippedIdentical),
+                    // transfer the companion .AAE sidecar if it is present in the source folder!
+                    let mut buffer_config = options.buffer_config;
+                    if !options.verify_hash {
+                        buffer_config.in_flight_hash = false;
+                        buffer_config.recheck_disk_hash = false;
+                    }
+                    match UnifiedFileTransferService::transfer_companion_sidecar_if_present(
+                        &task.source_path,
+                        &task.target_path,
+                        buffer_config,
+                        options.delete_source,
+                    )
+                    .await
+                    {
+                        Ok(sidecar_res) => {
+                            if sidecar_res.found && !sidecar_res.skipped_identical {
+                                bytes_transferred += sidecar_res.bytes_transferred;
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                source = %task.source_path.display(),
+                                error = %e,
+                                "Warning: Failed transferring companion .AAE sidecar for identical media file"
+                            );
+                        }
+                    }
+
                     let new_master_id = Uuid::new_v4();
                     let now = Utc::now();
+                    let replication_state = if configured_replica_drives.is_empty() {
+                        MasterReplicationState {
+                            status: ReplicationStatus::Replicated,
+                            pending_drives: Vec::new(),
+                            replicated_drives: Vec::new(),
+                            last_synced_at: Some(now),
+                        }
+                    } else {
+                        MasterReplicationState {
+                            status: ReplicationStatus::Pending,
+                            pending_drives: configured_replica_drives.clone(),
+                            replicated_drives: Vec::new(),
+                            last_synced_at: None,
+                        }
+                    };
+
                     let master_meta = DeduplicationMetadata {
                         cluster_id: Uuid::new_v4(),
                         status: DeduplicationStatus::CanonicalMaster,
                         canonical_master_id: Some(new_master_id),
                         canonical_master_path: Some(task.target_path.clone()),
                         drive_id: Some(plan.target_drive_id.clone()),
-                        drive_group: Some("primary".to_string()),
+                        drive_group: Some(target_group.clone()),
                         is_in_master_path: true,
                         reclaimable_bytes: 0,
                         evaluated_at: now,
+                        replication: Some(replication_state),
                     };
 
                     let original_doc = sink
@@ -345,47 +590,146 @@ impl MasterIngestService {
                         master_links.push((hash.clone(), new_master_id, task.target_path.clone()));
                     }
 
+                    let is_source_protected = guard.is_protected_path(&task.source_path);
+                    let is_source_on_replica_master = matcher
+                        .is_in_canonical_master(&task.source_path)
+                        && matcher
+                            .find_drive_for_path(&task.source_path)
+                            .map(|d| d.group.starts_with("replica") || d.group.eq_ignore_ascii_case("secondary"))
+                            .unwrap_or(false);
+
+                    let mut source_status = if is_source_on_replica_master {
+                        DeduplicationStatus::ReplicaKeep
+                    } else if is_source_protected {
+                        DeduplicationStatus::CanonicalMaster
+                    } else {
+                        DeduplicationStatus::MarkForRemoval
+                    };
+
+                    if options.delete_source && task.source_path.exists() {
+                        if is_source_protected {
+                            tracing::warn!(
+                                source = %task.source_path.display(),
+                                "Skipping source deletion: path resides within protected archive storage."
+                            );
+                        } else {
+                            match guard.safe_delete_file(&task.source_path) {
+                                Ok(_) => {
+                                    source_files_deleted += 1;
+                                    source_status = DeduplicationStatus::Removed;
+                                }
+                                Err(e) => {
+                                    errors.push(format!(
+                                        "Failed deleting source file '{}': {}",
+                                        task.source_path.display(),
+                                        e
+                                    ));
+                                }
+                            }
+                        }
+                    }
+
                     let meta = DeduplicationMetadata {
                         cluster_id: Uuid::new_v4(),
-                        status: DeduplicationStatus::MarkForRemoval,
+                        status: source_status,
                         canonical_master_id: Some(new_master_id),
                         canonical_master_path: Some(task.target_path.clone()),
                         drive_id: Some(plan.source_drive_id.clone()),
                         drive_group: None,
-                        is_in_master_path: false,
-                        reclaimable_bytes: task.file_size_bytes,
+                        is_in_master_path: is_source_protected,
+                        reclaimable_bytes: if is_source_protected {
+                            0
+                        } else {
+                            task.file_size_bytes
+                        },
                         evaluated_at: now,
+                        replication: None,
                     };
                     source_updates.push((task.source_doc_id, meta));
                 }
                 IngestTaskStatus::Pending => {
+                    // Acquire exclusive spindle locks for source and target drives
+                    let _spindle_guard = self
+                        .spindle_locks
+                        .acquire_transfer_locks(&task.source_path, &task.target_path)
+                        .await;
+
+                    let mut buffer_config = options.buffer_config;
+                    if !options.verify_hash {
+                        buffer_config.in_flight_hash = false;
+                        buffer_config.recheck_disk_hash = false;
+                    }
+
                     // Use shared UnifiedFileTransferService for verified streaming copy
                     match UnifiedFileTransferService::stream_copy_verified(
                         &task.source_path,
                         &task.target_path,
                         task.file_size_bytes,
                         task.cryptographic_hash.as_deref(),
-                        options.verify_hash,
+                        buffer_config,
                     )
                     .await
                     {
                         Ok(copied_bytes) => {
                             files_transferred += 1;
                             bytes_transferred += copied_bytes;
+                            if let Some(ref p) = pb {
+                                p.inc(copied_bytes);
+                            }
+
+                            // Transfer companion .AAE sidecar if present
+                            match UnifiedFileTransferService::transfer_companion_sidecar_if_present(
+                                &task.source_path,
+                                &task.target_path,
+                                buffer_config,
+                                options.delete_source,
+                            )
+                            .await
+                            {
+                                Ok(sidecar_res) => {
+                                    if sidecar_res.found && !sidecar_res.skipped_identical {
+                                        bytes_transferred += sidecar_res.bytes_transferred;
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        source = %task.source_path.display(),
+                                        error = %e,
+                                        "Warning: Failed transferring companion .AAE sidecar"
+                                    );
+                                }
+                            }
 
                             // Create canonical master document on primary
                             let new_master_id = Uuid::new_v4();
                             let now = Utc::now();
+                            let replication_state = if configured_replica_drives.is_empty() {
+                                MasterReplicationState {
+                                    status: ReplicationStatus::Replicated,
+                                    pending_drives: Vec::new(),
+                                    replicated_drives: Vec::new(),
+                                    last_synced_at: Some(now),
+                                }
+                            } else {
+                                MasterReplicationState {
+                                    status: ReplicationStatus::Pending,
+                                    pending_drives: configured_replica_drives.clone(),
+                                    replicated_drives: Vec::new(),
+                                    last_synced_at: None,
+                                }
+                            };
+
                             let master_meta = DeduplicationMetadata {
                                 cluster_id: Uuid::new_v4(),
                                 status: DeduplicationStatus::CanonicalMaster,
                                 canonical_master_id: Some(new_master_id),
                                 canonical_master_path: Some(task.target_path.clone()),
                                 drive_id: Some(plan.target_drive_id.clone()),
-                                drive_group: Some("primary".to_string()),
+                                drive_group: Some(target_group.clone()),
                                 is_in_master_path: true,
                                 reclaimable_bytes: 0,
                                 evaluated_at: now,
+                                replication: Some(replication_state),
                             };
 
                             let original_doc = sink
@@ -481,35 +825,42 @@ impl MasterIngestService {
                                 ));
                             }
 
-                            // Check if source file is on a replica drive in canonical master structure
+                            // Check if source file is on a protected archive drive (primary or replica)
+                            let is_source_protected = guard.is_protected_path(&task.source_path);
                             let is_source_on_replica_master = matcher
                                 .is_in_canonical_master(&task.source_path)
                                 && matcher
                                     .find_drive_for_path(&task.source_path)
-                                    .map(|d| d.group.starts_with("replica"))
+                                    .map(|d| d.group.starts_with("replica") || d.group.eq_ignore_ascii_case("secondary"))
                                     .unwrap_or(false);
 
                             let mut source_status = if is_source_on_replica_master {
                                 DeduplicationStatus::ReplicaKeep
+                            } else if is_source_protected {
+                                DeduplicationStatus::CanonicalMaster
                             } else {
                                 DeduplicationStatus::MarkForRemoval
                             };
 
-                            if options.delete_source
-                                && task.source_path.exists()
-                                && !is_source_on_replica_master
-                            {
-                                match std::fs::remove_file(&task.source_path) {
-                                    Ok(_) => {
-                                        source_files_deleted += 1;
-                                        source_status = DeduplicationStatus::Removed;
-                                    }
-                                    Err(e) => {
-                                        errors.push(format!(
-                                            "Failed deleting source file '{}': {}",
-                                            task.source_path.display(),
-                                            e
-                                        ));
+                            if options.delete_source && task.source_path.exists() {
+                                if is_source_protected {
+                                    tracing::warn!(
+                                        source = %task.source_path.display(),
+                                        "Skipping source deletion: path resides within protected archive storage (primary or replica)."
+                                    );
+                                } else {
+                                    match guard.safe_delete_file(&task.source_path) {
+                                        Ok(_) => {
+                                            source_files_deleted += 1;
+                                            source_status = DeduplicationStatus::Removed;
+                                        }
+                                        Err(e) => {
+                                            errors.push(format!(
+                                                "Failed deleting source file '{}': {}",
+                                                task.source_path.display(),
+                                                e
+                                            ));
+                                        }
                                     }
                                 }
                             }
@@ -521,18 +872,22 @@ impl MasterIngestService {
                                 canonical_master_path: Some(task.target_path.clone()),
                                 drive_id: Some(plan.source_drive_id.clone()),
                                 drive_group: None,
-                                is_in_master_path: is_source_on_replica_master,
-                                reclaimable_bytes: if is_source_on_replica_master {
+                                is_in_master_path: is_source_protected,
+                                reclaimable_bytes: if is_source_protected {
                                     0
                                 } else {
                                     task.file_size_bytes
                                 },
                                 evaluated_at: now,
+                                replication: None,
                             };
                             source_updates.push((task.source_doc_id, source_meta));
                         }
                         Err(e) => {
                             files_failed += 1;
+                            if let Some(ref p) = pb {
+                                p.inc(task.file_size_bytes);
+                            }
                             errors.push(format!("{}", e));
                         }
                     }
@@ -540,9 +895,16 @@ impl MasterIngestService {
                 IngestTaskStatus::CopiedVerified => {}
                 IngestTaskStatus::Failed(ref err) => {
                     files_failed += 1;
+                    if let Some(ref p) = pb {
+                        p.inc(task.file_size_bytes);
+                    }
                     errors.push(err.clone());
                 }
             }
+        }
+
+        if let Some(ref p) = pb {
+            p.finish_and_clear();
         }
 
         // Commit database writes
@@ -561,14 +923,26 @@ impl MasterIngestService {
             }
         }
 
-        if !master_links.is_empty() {
-            if let Err(e) = sink.link_canonical_masters(&master_links).await {
-                errors.push(format!(
-                    "Failed linking duplicate records to canonical master: {}",
-                    e
-                ));
+        let duplicates_linked = if !master_links.is_empty() {
+            match sink.link_canonical_masters(&master_links).await {
+                Ok(n) => n,
+                Err(e) => {
+                    errors.push(format!(
+                        "Failed linking duplicate records to canonical master: {}",
+                        e
+                    ));
+                    0
+                }
             }
-        }
+        } else {
+            0
+        };
+
+        let replication_pending_count = if !configured_replica_drives.is_empty() {
+            new_master_docs.len()
+        } else {
+            0
+        };
 
         Ok(IngestExecutionReport {
             source_drive_id: plan.source_drive_id,
@@ -580,6 +954,8 @@ impl MasterIngestService {
             files_failed,
             bytes_transferred,
             source_files_deleted,
+            duplicates_linked,
+            replication_pending_count,
             elapsed_seconds: start.elapsed().as_secs_f64(),
             errors,
         })

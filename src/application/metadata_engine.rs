@@ -149,6 +149,45 @@ impl MetadataExtractionEngine {
             dedup: None,
         }
     }
+
+    /// Extracts metadata for a batch of items in parallel across Rayon workers,
+    /// invoking `on_item_processed(1, file_size)` immediately as each individual
+    /// file completes extraction.
+    pub async fn extract_batch_with_progress<F>(
+        &self,
+        batch: DiscoveryBatch,
+        scanned_root: Option<&Path>,
+        on_item_processed: F,
+    ) -> Vec<MediaMetadataDocument>
+    where
+        F: Fn(u64, u64) + Send + Sync + 'static,
+    {
+        let root = scanned_root.map(|p| p.to_path_buf());
+        let engine = self.clone();
+
+        tokio::task::spawn_blocking(move || {
+            batch
+                .items
+                .par_iter()
+                .map(|item| {
+                    let doc = engine
+                        .extract_file(item, root.as_deref())
+                        .unwrap_or_else(|err| {
+                            MetadataExtractionEngine::make_failed_document(
+                                item,
+                                root.as_deref(),
+                                &err,
+                            )
+                        });
+                    let bytes = doc.file_context.file_size_bytes;
+                    on_item_processed(1, bytes);
+                    doc
+                })
+                .collect()
+        })
+        .await
+        .unwrap_or_default()
+    }
 }
 
 impl MediaMetadataExtractor for MetadataExtractionEngine {
@@ -166,7 +205,7 @@ impl MediaMetadataExtractor for MetadataExtractionEngine {
 
         let res = match item.category {
             MediaCategory::Video => self.video_extractor.extract_file(item, scanned_root),
-            MediaCategory::Photo | MediaCategory::RawPhoto => {
+            MediaCategory::Photo | MediaCategory::RawPhoto | MediaCategory::Sidecar => {
                 self.exif_extractor.extract_file(item, scanned_root)
             }
         };
@@ -227,27 +266,7 @@ impl BatchMetadataExtractor for MetadataExtractionEngine {
         batch: DiscoveryBatch,
         scanned_root: Option<&Path>,
     ) -> Vec<MediaMetadataDocument> {
-        let root = scanned_root.map(|p| p.to_path_buf());
-        let engine = self.clone();
-
-        tokio::task::spawn_blocking(move || {
-            batch
-                .items
-                .par_iter()
-                .map(|item| {
-                    engine
-                        .extract_file(item, root.as_deref())
-                        .unwrap_or_else(|err| {
-                            MetadataExtractionEngine::make_failed_document(
-                                item,
-                                root.as_deref(),
-                                &err,
-                            )
-                        })
-                })
-                .collect()
-        })
-        .await
-        .unwrap_or_default()
+        self.extract_batch_with_progress(batch, scanned_root, |_, _| {})
+            .await
     }
 }

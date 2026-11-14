@@ -181,6 +181,21 @@ impl MetadataStorageSink for MockStorageSink {
         Ok(())
     }
 
+    async fn delete_document(&self, _doc_id: Uuid) -> Result<bool, StorageError> {
+        Ok(true)
+    }
+
+    async fn delete_documents(&self, doc_ids: &[Uuid]) -> Result<usize, StorageError> {
+        Ok(doc_ids.len())
+    }
+
+    async fn purge_removed_records(
+        &self,
+        _mount_prefix: Option<&str>,
+    ) -> Result<usize, StorageError> {
+        Ok(0)
+    }
+
     async fn query_all_content_groups(
         &self,
         _mount_prefix: Option<&str>,
@@ -416,11 +431,70 @@ async fn test_run_universal_classification() {
         .unwrap();
 
     assert_eq!(summary.total_files_scanned, 3);
-    assert_eq!(summary.unique_media_count, 1);
+    assert_eq!(summary.unique_media_count, 2);
+    assert_eq!(summary.needs_ingest_files, 2);
     assert_eq!(summary.duplicate_clusters_count, 1);
     assert_eq!(summary.exact_duplicate_files, 1);
     assert_eq!(summary.total_reclaimable_bytes, 4_000_000);
     assert_eq!(sink.received_updates.lock().unwrap().len(), 3);
+}
+
+#[tokio::test]
+async fn test_universal_classification_preserves_replicas_without_redundancy() {
+    let config = create_test_config();
+    let engine = MediaDeduplicationEngine::new();
+
+    let doc_primary = create_mock_doc(
+        "/Volumes/SP-1/SPSA/media/master/2026/04-Jun-2026/Videos/PXL_20260604_053435528.mp4",
+        50_000_000,
+        "hash_video_123",
+    );
+    let doc_replica = create_mock_doc(
+        "/Volumes/SP-2/SPSA/media/master/2026/04-Jun-2026/Videos/PXL_20260604_053435528.mp4",
+        50_000_000,
+        "hash_video_123",
+    );
+
+    let content_groups = vec![(
+        "hash_video_123".to_string(),
+        vec![doc_primary.clone(), doc_replica.clone()],
+    )];
+
+    let sink = MockStorageSink {
+        duplicate_groups: Arc::new(Mutex::new(content_groups)),
+        received_updates: Arc::new(Mutex::new(Vec::new())),
+    };
+
+    let summary = engine
+        .run_universal_classification(&sink, &config, false)
+        .await
+        .unwrap();
+
+    // Replicas must be preserved as ReplicaKeep and never marked for removal or counted as redundant!
+    assert_eq!(summary.total_files_scanned, 2);
+    assert_eq!(summary.unique_media_count, 1);
+    assert_eq!(summary.canonical_masters_count, 1);
+    assert_eq!(summary.replica_files_preserved, 1);
+    assert_eq!(summary.exact_duplicate_files, 0);
+    assert_eq!(summary.duplicate_clusters_count, 0);
+    assert_eq!(summary.total_reclaimable_bytes, 0);
+
+    let updates = sink.received_updates.lock().unwrap().clone();
+    assert_eq!(updates.len(), 2);
+
+    let update_map: HashMap<Uuid, DeduplicationMetadata> = updates.into_iter().collect();
+    assert_eq!(
+        update_map.get(&doc_primary.id).unwrap().status,
+        DeduplicationStatus::CanonicalMaster
+    );
+    assert_eq!(
+        update_map.get(&doc_replica.id).unwrap().status,
+        DeduplicationStatus::ReplicaKeep
+    );
+    assert_eq!(
+        update_map.get(&doc_replica.id).unwrap().reclaimable_bytes,
+        0
+    );
 }
 
 #[test]
