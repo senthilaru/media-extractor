@@ -375,8 +375,8 @@ impl DrivePruningService {
                                 );
                             candidate_paths.push(master_drive.master_path.join(&rel_sidecar));
 
-                            if stem.starts_with("IMG_O") {
-                                let norm_stem = format!("IMG_{}", &stem[5..]);
+                            if let Some(rest) = stem.strip_prefix("IMG_O") {
+                                let norm_stem = format!("IMG_{}", rest);
                                 let rel_norm =
                                     UnifiedFileTransferService::build_canonical_relative_path(
                                         year,
@@ -386,8 +386,8 @@ impl DrivePruningService {
                                         &format!("{}.{}", norm_stem, e),
                                     );
                                 candidate_paths.push(master_drive.master_path.join(&rel_norm));
-                            } else if stem.starts_with("IMG_") {
-                                let o_stem = format!("IMG_O{}", &stem[4..]);
+                            } else if let Some(rest) = stem.strip_prefix("IMG_") {
+                                let o_stem = format!("IMG_O{}", rest);
                                 let rel_o =
                                     UnifiedFileTransferService::build_canonical_relative_path(
                                         year,

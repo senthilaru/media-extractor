@@ -135,31 +135,94 @@ impl MasterIngestService {
         config: &DriveConfiguration,
         options: &IngestOptions,
     ) -> Result<MasterIngestPlan, DeduplicationError> {
-        let (source_drive, target_drive) = Self::resolve_drives(
-            config,
-            &options.source_drive,
-            options.target_drive.as_deref(),
-        )?;
+        let is_all_sources = options.source_drive.trim().is_empty()
+            || options.source_drive.eq_ignore_ascii_case("all")
+            || options.source_drive.eq_ignore_ascii_case("database");
 
-        // Verify source drive mount
-        if !source_drive.mount_path.exists() {
-            return Err(DeduplicationError::DriveNotMounted {
-                drive: source_drive.id.clone(),
-                path: source_drive.mount_path.clone(),
-            });
-        }
+        let (source_drive_id, source_mount_path, source_mount_str, target_drive) = if is_all_sources {
+            let target_drive = if let Some(target_id) = options.target_drive.as_deref() {
+                DrivePruningService::resolve_drive(config, target_id)
+                    .or_else(|| {
+                        config
+                            .drives
+                            .iter()
+                            .find(|d| d.group.eq_ignore_ascii_case(target_id))
+                    })
+                    .ok_or_else(|| {
+                        DeduplicationError::ConfigError(format!(
+                            "Target master drive '{}' not found in configuration",
+                            target_id
+                        ))
+                    })?
+            } else {
+                if config.drives.is_empty() {
+                    return Err(DeduplicationError::ConfigError(
+                        "No drives configured in drives.yaml".to_string(),
+                    ));
+                }
 
-        // Verify target drive mount
-        if !target_drive.mount_path.exists() {
-            return Err(DeduplicationError::DriveNotMounted {
-                drive: target_drive.id.clone(),
-                path: target_drive.mount_path.clone(),
-            });
-        }
+                let mut candidates: Vec<&DriveDefinition> = config.drives.iter().collect();
+                candidates.sort_by(|a, b| {
+                    let prio_a = config.groups.get(&a.group).map(|g| g.priority).unwrap_or(0);
+                    let prio_b = config.groups.get(&b.group).map(|g| g.priority).unwrap_or(0);
+                    prio_b.cmp(&prio_a).then_with(|| a.id.cmp(&b.id))
+                });
 
-        let source_mount_str = source_drive.mount_path.to_string_lossy();
+                let mounted = candidates.iter().copied().find(|d| d.mount_path.exists());
+                match mounted {
+                    Some(drive) => drive,
+                    None => candidates[0],
+                }
+            };
+
+            // Verify target drive mount
+            if !target_drive.mount_path.exists() {
+                return Err(DeduplicationError::DriveNotMounted {
+                    drive: target_drive.id.clone(),
+                    path: target_drive.mount_path.clone(),
+                });
+            }
+
+            (
+                "database".to_string(),
+                PathBuf::from("(Catalog Database Candidates)"),
+                None,
+                target_drive,
+            )
+        } else {
+            let (source_drive, target_drive) = Self::resolve_drives(
+                config,
+                &options.source_drive,
+                options.target_drive.as_deref(),
+            )?;
+
+            // Verify source drive mount
+            if !source_drive.mount_path.exists() {
+                return Err(DeduplicationError::DriveNotMounted {
+                    drive: source_drive.id.clone(),
+                    path: source_drive.mount_path.clone(),
+                });
+            }
+
+            // Verify target drive mount
+            if !target_drive.mount_path.exists() {
+                return Err(DeduplicationError::DriveNotMounted {
+                    drive: target_drive.id.clone(),
+                    path: target_drive.mount_path.clone(),
+                });
+            }
+
+            let mount_str = source_drive.mount_path.to_string_lossy().to_string();
+            (
+                source_drive.id.clone(),
+                source_drive.mount_path.clone(),
+                Some(mount_str),
+                target_drive,
+            )
+        };
+
         let unmastered_docs = sink
-            .query_unmastered_candidates(Some(&source_mount_str))
+            .query_unmastered_candidates(source_mount_str.as_deref())
             .await?;
 
         let canonical_masters = if unmastered_docs
@@ -177,6 +240,13 @@ impl MasterIngestService {
         let hasher = Blake3MediaHasher::new();
 
         for doc in unmastered_docs {
+            if is_all_sources && !doc.file_context.file_path.exists() {
+                tracing::warn!(
+                    path = %doc.file_context.file_path.display(),
+                    "Skipping unmastered candidate: source file does not exist on disk (unmounted drive?)"
+                );
+                continue;
+            }
             let cat = doc.file_context.media_category;
 
             // 1. Resolve date components
@@ -316,9 +386,9 @@ impl MasterIngestService {
         }
 
         Ok(MasterIngestPlan {
-            source_drive_id: source_drive.id.clone(),
+            source_drive_id,
             target_drive_id: target_drive.id.clone(),
-            source_mount: source_drive.mount_path.clone(),
+            source_mount: source_mount_path,
             target_master_root: target_drive.master_path.clone(),
             tasks,
             total_bytes,

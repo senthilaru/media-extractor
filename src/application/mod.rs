@@ -1,3 +1,4 @@
+pub mod audit_service;
 pub mod batch_accumulator;
 pub mod dedup_engine;
 pub mod drive_pruner;
@@ -10,6 +11,7 @@ pub mod progress_tracker;
 pub mod replica_service;
 pub mod transfer_service;
 
+pub use audit_service::AuditService;
 pub use dedup_engine::MediaDeduplicationEngine;
 pub use drive_pruner::DrivePruningService;
 pub use ingest_service::MasterIngestService;

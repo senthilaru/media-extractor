@@ -1,3 +1,4 @@
+pub mod audit_models;
 pub mod dedup_models;
 pub mod errors;
 pub mod metadata_models;
@@ -5,6 +6,10 @@ pub mod models;
 pub mod ports;
 pub mod progress_models;
 
+pub use audit_models::{
+    CatalogAuditReport, CommandRecommendation, ExtensionCount, InspectionCategory,
+    InspectionSample, ReplicaDriveCount,
+};
 pub use dedup_models::{
     CanonicalAsset, DeduplicationConfig, DeduplicationSummary, DuplicateCluster,
     DuplicateRelationship, DuplicateVariant, FingerprintConfig, MediaFingerprint, RotatedHashes,

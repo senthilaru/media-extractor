@@ -1645,3 +1645,97 @@ async fn test_ingest_delete_source_never_deletes_protected_archive() {
     let status = updated_doc.dedup.unwrap().status;
     assert_ne!(status, DeduplicationStatus::Removed);
 }
+
+#[tokio::test]
+async fn test_ingest_without_source_drive_ingests_all_unmastered_from_database() {
+    let temp_primary = tempfile::tempdir().unwrap();
+    let primary_mount = temp_primary.path().to_path_buf();
+    let primary_master = primary_mount.join("master");
+    std::fs::create_dir_all(&primary_master).unwrap();
+
+    let temp_source = tempfile::tempdir().unwrap();
+    let source_file = temp_source.path().join("unmastered_photo.jpg");
+    std::fs::write(&source_file, b"unmastered photo payload").unwrap();
+
+    let sink = MockIngestStorageSink::default();
+    let doc_id = Uuid::new_v4();
+    let unmastered_doc = MediaMetadataDocument {
+        id: doc_id,
+        file_context: FileContext {
+            scanned_root: temp_source.path().to_path_buf(),
+            file_path: source_file.clone(),
+            relative_path: PathBuf::from("unmastered_photo.jpg"),
+            file_name: "unmastered_photo.jpg".to_string(),
+            file_size_bytes: 24,
+            extension: "jpg".to_string(),
+            media_category: MediaCategory::Photo,
+            modified_at: Some(Utc::now()),
+        },
+        temporal: metadata_extractor::TemporalMetadata::from_utc_datetime(
+            Utc::now(),
+            metadata_extractor::TimestampSource::ExifDateTimeOriginal,
+        ),
+        camera: None,
+        exposure: None,
+        location: None,
+        dimensions: None,
+        video: None,
+        fingerprint: None,
+        extraction_status: Default::default(),
+        dedup: Some(DeduplicationMetadata {
+            cluster_id: Uuid::new_v4(),
+            status: DeduplicationStatus::NeedsIngestToMaster,
+            canonical_master_id: None,
+            canonical_master_path: None,
+            drive_id: None,
+            drive_group: None,
+            is_in_master_path: false,
+            reclaimable_bytes: 24,
+            evaluated_at: Utc::now(),
+            replication: None,
+        }),
+    };
+    sink.save_batch(&[unmastered_doc]).await.unwrap();
+
+    let mut groups = HashMap::new();
+    groups.insert(
+        "primary".to_string(),
+        DriveGroupSpec {
+            priority: 100,
+            description: Some("Primary".to_string()),
+        },
+    );
+
+    let config = DriveConfiguration {
+        version: "1.0".to_string(),
+        groups,
+        drives: vec![DriveDefinition {
+            id: "primary_main".to_string(),
+            mount_path: primary_mount,
+            master_path: primary_master.clone(),
+            group: "primary".to_string(),
+        }],
+        rules: DriveRules::default(),
+    };
+
+    let service = MasterIngestService::new();
+    // Empty source_drive option simulates running `cargo run -- ingest` without arguments
+    let opts = IngestOptions {
+        source_drive: String::new(),
+        target_drive: None,
+        dry_run: false,
+        delete_source: false,
+        verify_hash: true,
+        buffer_config: Default::default(),
+    };
+
+    let report = service.execute_ingest(&sink, &config, opts).await.unwrap();
+    assert_eq!(report.files_transferred, 1);
+    assert_eq!(report.source_drive_id, "database");
+
+    // Verify canonical master file was created in primary master folder
+    let masters = sink.query_canonical_masters().await.unwrap();
+    assert_eq!(masters.len(), 1);
+    assert!(masters[0].file_context.file_path.exists());
+    assert!(masters[0].file_context.file_path.starts_with(&primary_master));
+}

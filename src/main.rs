@@ -12,7 +12,9 @@ use metadata_extractor::application::organize_service::{
     OrganizePipelineOptions, OrganizePipelineService,
 };
 use metadata_extractor::application::pipeline::ExtractionPipeline;
+use metadata_extractor::application::AuditService;
 use metadata_extractor::application::MetadataExtractionEngine;
+use metadata_extractor::domain::audit_models::{CatalogAuditReport, InspectionCategory};
 use metadata_extractor::domain::dedup_models::{
     DeduplicationConfig, DeduplicationMetadata, DeduplicationSummary, DuplicateCluster,
     FingerprintConfig, IngestOptions, MediaFingerprint, TransferBufferConfig,
@@ -144,6 +146,63 @@ enum Commands {
     /// Run the unified end-to-end media organization pipeline (extract -> dedup -> ingest -> sync-replicas -> prune)
     #[command(alias = "archive", alias = "pipeline")]
     Organize(OrganizeArgs),
+
+    /// Generate a summary report of database content, health metrics, and suggested next actions
+    #[command(alias = "status", alias = "audit")]
+    Report(ReportArgs),
+}
+
+#[derive(Parser, Debug)]
+struct ReportArgs {
+    /// Path to drive configuration YAML file
+    #[arg(
+        short = 'c',
+        long,
+        default_value = "drives.yaml",
+        env = "MEDIA_DRIVES_CONFIG"
+    )]
+    config: PathBuf,
+
+    /// MongoDB connection URI override
+    #[arg(long, visible_alias = "db-uri", env = "MONGODB_URI")]
+    mongodb_uri: Option<String>,
+
+    /// Target MongoDB collection name override
+    #[arg(long, visible_alias = "db-collection", env = "MONGODB_COLLECTION")]
+    collection: Option<String>,
+
+    /// Output format (text or json)
+    #[arg(short = 'f', long, value_enum, default_value_t = OutputFormat::Text)]
+    format: OutputFormat,
+
+    /// Direct category shortcut to inspect top sample filepaths (problems, missing-exif, duplicates, unreplicated, marked-for-delete, unmastered)
+    #[arg(short = 'i', long)]
+    inspect: Option<String>,
+
+    /// Maximum number of sample filepaths to display when inspecting (default: 3)
+    #[arg(short = 'n', long, default_value_t = 3)]
+    limit: usize,
+
+    /// Subcommand for explicit operations
+    #[command(subcommand)]
+    subcommand: Option<ReportSubcommands>,
+}
+
+#[derive(Subcommand, Debug)]
+enum ReportSubcommands {
+    /// Inspect top sample items for a specific status category
+    Inspect(ReportInspectArgs),
+}
+
+#[derive(Parser, Debug)]
+struct ReportInspectArgs {
+    /// Category to inspect: problems, missing-exif, duplicates, unreplicated, marked-for-delete, unmastered
+    #[arg(required = true)]
+    category: String,
+
+    /// Maximum number of sample filepaths to display (default: 3)
+    #[arg(short = 'n', long, default_value_t = 3)]
+    limit: usize,
 }
 
 #[derive(Parser, Debug)]
@@ -264,9 +323,9 @@ struct SyncReplicasArgs {
 
 #[derive(Parser, Debug)]
 struct IngestArgs {
-    /// Source drive ID, external drive mount path, or local directory path holding unmastered files
-    #[arg(short = 's', long, required = true)]
-    source_drive: String,
+    /// Source drive ID, external drive mount path, or local directory path holding unmastered files (optional: if omitted, all unmastered candidates in database are ingested)
+    #[arg(short = 's', long)]
+    source_drive: Option<String>,
 
     /// Target primary master drive ID (defaults to configured primary drive)
     #[arg(short = 't', long)]
@@ -623,6 +682,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Commands::Ingest(args) => run_ingest(args).await?,
             Commands::SyncReplicas(args) => run_sync_replicas(args).await?,
             Commands::Organize(args) => run_organize_cli(args).await?,
+            Commands::Report(args) => run_report_cli(args).await?,
         }
     } else if let Some(path) = cli.path {
         let args = ExtractArgs {
@@ -1588,7 +1648,7 @@ async fn run_ingest(args: IngestArgs) -> Result<(), Box<dyn std::error::Error>> 
 
     let service = MasterIngestService::new();
     let options = IngestOptions {
-        source_drive: args.source_drive,
+        source_drive: args.source_drive.unwrap_or_default(),
         target_drive: args.target_drive,
         dry_run: args.dry_run,
         delete_source: args.delete_source,
@@ -2099,4 +2159,157 @@ async fn run_organize_cli(args: OrganizeArgs) -> Result<(), Box<dyn std::error::
     }
 
     Ok(())
+}
+
+async fn run_report_cli(args: ReportArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let db_config = resolve_db_config(args.mongodb_uri, args.collection);
+
+    let sink = match MongoDbStorageSink::connect(db_config.clone()).await {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Database error: {}", e);
+            std::process::exit(3);
+        }
+    };
+
+    let audit_service = AuditService::new(std::sync::Arc::new(sink));
+
+    // Determine if inspection was requested (either via subcommand or --inspect flag)
+    let inspect_target = if let Some(ReportSubcommands::Inspect(inspect_args)) = args.subcommand {
+        Some((inspect_args.category, inspect_args.limit))
+    } else if let Some(cat) = args.inspect {
+        Some((cat, args.limit))
+    } else {
+        None
+    };
+
+    if let Some((category_str, limit)) = inspect_target {
+        let category: InspectionCategory = category_str.parse().map_err(|e: String| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, e)
+        })?;
+
+        let samples = audit_service.inspect_samples(category, limit).await?;
+
+        if args.format == OutputFormat::Json {
+            let json_output = serde_json::json!({
+                "category": category.to_string(),
+                "sample_count": samples.len(),
+                "limit": limit,
+                "samples": samples,
+            });
+            println!("{}", serde_json::to_string_pretty(&json_output)?);
+        } else {
+            println!("================================================================================");
+            println!("                 SAMPLE INSPECTION: {:<40}", format!("{}", category));
+            println!("================================================================================");
+            if samples.is_empty() {
+                println!("No items found matching category '{}'.", category);
+            } else {
+                println!("Found {} item(s) (showing top {}):", samples.len(), limit);
+                println!();
+                for (i, sample) in samples.iter().enumerate() {
+                    println!("[{}] {} ({} bytes)", i + 1, sample.file_path.display(), sample.file_size_bytes);
+                    if let Some(ref detail) = sample.diagnostic_detail {
+                        println!("    Detail: {}", detail);
+                    }
+                    println!();
+                }
+            }
+            println!("--------------------------------------------------------------------------------");
+            println!("Suggested Next Action: Review files manually or re-extract after fixing permissions");
+            println!("================================================================================");
+        }
+    } else {
+        let mut report = audit_service.generate_report().await?;
+
+        // If drive configuration is available, enrich replica drives with any configured replica targets
+        if let Ok(drive_cfg) = DrivesConfigLoader::load_from_env_or_path(Some(&args.config)) {
+            let primary_id = drive_cfg
+                .drives
+                .iter()
+                .find(|d| d.group.eq_ignore_ascii_case("primary"))
+                .map(|d| d.id.as_str());
+
+            if let Ok((_primary, replica_defs)) =
+                metadata_extractor::application::replica_service::ReplicaSyncService::resolve_drives(
+                    &drive_cfg,
+                    primary_id,
+                    None,
+                )
+            {
+                for rep in replica_defs {
+                    if !report.replica_drives.iter().any(|d| d.drive_id == rep.id) {
+                        report.replica_drives.push(
+                            metadata_extractor::domain::audit_models::ReplicaDriveCount {
+                                drive_id: rep.id.clone(),
+                                replicated_count: 0,
+                                pending_count: report.copied_to_master,
+                            },
+                        );
+                    }
+                }
+            }
+        }
+
+        // Re-evaluate recommendation with enriched replica drives
+        report.recommended_action = Some(AuditService::evaluate_recommendation(&report));
+
+        if args.format == OutputFormat::Json {
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        } else {
+            render_text_audit_report(&report);
+        }
+    }
+
+    Ok(())
+}
+
+fn render_text_audit_report(report: &CatalogAuditReport) {
+    println!("================================================================================");
+    println!("                      DATABASE CONTENT & HEALTH REPORT                          ");
+    println!("================================================================================");
+    println!("Generated At: {}", report.generated_at.format("%Y-%m-%d %H:%M:%S UTC"));
+    println!("Total Cataloged Files: {}", report.total_files);
+    println!();
+    println!("Format Breakdown:");
+    if report.extension_counts.is_empty() {
+        println!("  (No files cataloged)");
+    } else {
+        for ext in &report.extension_counts {
+            let label = if ext.extension.starts_with('.') || ext.extension.starts_with('[') {
+                ext.extension.clone()
+            } else {
+                format!(".{}", ext.extension)
+            };
+            println!("  {:<10} {:>8}  ({:>5.1}%)", label, ext.count, ext.percentage);
+        }
+    }
+    println!();
+    println!("Catalog Lifecycle & Health Status:");
+    println!("  ✓ Copied / Ingested to Master : {:>8}", report.copied_to_master);
+    println!("  🛡 Replicated Backups Preserved : {:>8}", report.total_replicas);
+    if !report.replica_drives.is_empty() {
+        for rep in &report.replica_drives {
+            println!(
+                "     - {:<24} : {:>8}  ({:>6} yet to replicate)",
+                rep.drive_id, rep.replicated_count, rep.pending_count
+            );
+        }
+    }
+    println!("  ⧗ Master Assets Pending Backup: {:>8}", report.yet_to_replicate);
+    println!("  ⧉ Duplicate Assets (To Prune) : {:>8}", report.duplicates_detected);
+    println!("  ✕ Marked for Deletion / Prune : {:>8}", report.marked_for_delete);
+    println!("  ? Lacking EXIF Metadata       : {:>8}", report.missing_exif);
+    println!("  ! Problematic / Error Files   : {:>8}", report.problem_files);
+    println!("  → Unmastered / Scanned Assets : {:>8}", report.unmastered_files);
+    println!();
+    println!("--------------------------------------------------------------------------------");
+    if let Some(ref action) = report.recommended_action {
+        println!("SUGGESTED NEXT ACTION: {}", action.title);
+        println!("  Reason : {}", action.reason);
+        println!("  Command: {}", action.command);
+    } else {
+        println!("SUGGESTED NEXT ACTION: Catalog is in healthy state.");
+    }
+    println!("================================================================================");
 }

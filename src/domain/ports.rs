@@ -268,6 +268,25 @@ pub trait MetadataStorageSink: Send + Sync {
     ) -> Result<Vec<MediaMetadataDocument>, StorageError> {
         Ok(Vec::new())
     }
+
+    /// Aggregates and returns a comprehensive catalog inventory and health audit report.
+    async fn generate_audit_report(
+        &self,
+    ) -> Result<crate::domain::audit_models::CatalogAuditReport, StorageError> {
+        Err(StorageError::QueryFailed {
+            collection: "media_metadata".to_string(),
+            message: "generate_audit_report not implemented".to_string(),
+        })
+    }
+
+    /// Queries top sample assets matching an inspection category.
+    async fn query_inspection_samples(
+        &self,
+        _category: crate::domain::audit_models::InspectionCategory,
+        _limit: usize,
+    ) -> Result<Vec<crate::domain::audit_models::InspectionSample>, StorageError> {
+        Ok(Vec::new())
+    }
 }
 
 /// Port for reporting live progress updates and phase transitions.

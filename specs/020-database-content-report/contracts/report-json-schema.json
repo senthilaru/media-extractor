@@ -1,0 +1,119 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "CatalogAuditReport",
+  "type": "object",
+  "required": [
+    "total_files",
+    "extension_counts",
+    "copied_to_master",
+    "total_replicas",
+    "replica_drives",
+    "yet_to_replicate",
+    "duplicates_detected",
+    "marked_for_delete",
+    "missing_exif",
+    "problem_files",
+    "unmastered_files",
+    "generated_at"
+  ],
+  "properties": {
+    "total_files": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Total cataloged media assets in database"
+    },
+    "extension_counts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["extension", "count", "percentage"],
+        "properties": {
+          "extension": { "type": "string" },
+          "count": { "type": "integer", "minimum": 0 },
+          "percentage": { "type": "number", "minimum": 0.0, "maximum": 100.0 }
+        }
+      }
+    },
+    "copied_to_master": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Number of assets ingested into canonical master"
+    },
+    "total_replicas": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Total number of verified replica backup copies preserved on backup drives"
+    },
+    "replica_drives": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["drive_id", "replicated_count", "pending_count"],
+        "properties": {
+          "drive_id": { "type": "string" },
+          "replicated_count": { "type": "integer", "minimum": 0 },
+          "pending_count": { "type": "integer", "minimum": 0 }
+        }
+      }
+    },
+    "yet_to_replicate": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Number of canonical masters awaiting replication to backup targets"
+    },
+    "duplicates_detected": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Number of duplicate assets identified for pruning (MarkForRemoval / Removed)"
+    },
+    "marked_for_delete": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Number of files marked for deletion or pruning"
+    },
+    "missing_exif": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Number of files without EXIF or creation metadata"
+    },
+    "problem_files": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Number of files with extraction or validation errors"
+    },
+    "unmastered_files": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Number of scanned files pending master ingestion"
+    },
+    "generated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "recommended_action": {
+      "type": ["object", "null"],
+      "properties": {
+        "priority": { "type": "integer" },
+        "title": { "type": "string" },
+        "reason": { "type": "string" },
+        "command": { "type": "string" }
+      },
+      "required": ["priority", "title", "reason", "command"]
+    },
+    "samples": {
+      "type": ["array", "null"],
+      "items": {
+        "type": "object",
+        "required": ["id", "file_path", "file_size_bytes", "extension", "category"],
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "file_path": { "type": "string" },
+          "file_size_bytes": { "type": "integer" },
+          "extension": { "type": "string" },
+          "category": { "type": "string" },
+          "diagnostic_detail": { "type": ["string", "null"] }
+        }
+      }
+    }
+  }
+}

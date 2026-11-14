@@ -9,9 +9,13 @@ pub mod infrastructure;
 
 // Convenience re-exports
 pub use application::{
-    DrivePruningService, ExtractionPipeline, MasterIngestService, MediaDeduplicationEngine,
-    MetadataExtractionEngine, ProgressTracker, ReplicaSyncOptions, ReplicaSyncService,
-    UnifiedFileTransferService,
+    AuditService, DrivePruningService, ExtractionPipeline, MasterIngestService,
+    MediaDeduplicationEngine, MetadataExtractionEngine, ProgressTracker, ReplicaSyncOptions,
+    ReplicaSyncService, UnifiedFileTransferService,
+};
+pub use domain::audit_models::{
+    CatalogAuditReport, CommandRecommendation, ExtensionCount, InspectionCategory,
+    InspectionSample, ReplicaDriveCount,
 };
 pub use domain::dedup_models::{
     CanonicalAsset, CanonicalPathStatus, DeduplicationConfig, DeduplicationMetadata,

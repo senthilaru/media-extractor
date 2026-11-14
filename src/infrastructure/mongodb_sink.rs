@@ -6,6 +6,9 @@ use mongodb::{Client, Collection, Database, IndexModel, Namespace};
 use std::collections::HashMap;
 use std::time::Duration;
 
+use crate::domain::audit_models::{
+    CatalogAuditReport, ExtensionCount, InspectionCategory, InspectionSample, ReplicaDriveCount,
+};
 use crate::domain::dedup_models::{DeduplicationMetadata, DeduplicationStatus};
 use crate::domain::errors::StorageError;
 use crate::domain::metadata_models::{
@@ -906,6 +909,362 @@ impl MetadataStorageSink for MongoDbStorageSink {
         }
 
         Ok(total_updated)
+    }
+
+    async fn update_master_replication_state(
+        &self,
+        master_id: uuid::Uuid,
+        replication_state: &crate::domain::dedup_models::MasterReplicationState,
+    ) -> Result<(), StorageError> {
+        let filter = doc! { "id": master_id.to_string() };
+        let state_bson = json_to_bson(
+            serde_json::to_value(replication_state)
+                .map_err(|e| StorageError::SerializationError(e.to_string()))?,
+        );
+        let update = doc! {
+            "$set": {
+                "dedup.replication": state_bson
+            }
+        };
+        self.collection
+            .update_one(filter, update)
+            .await
+            .map_err(|e| StorageError::QueryFailed {
+                collection: self.config.collection_name.clone(),
+                message: format!("Failed updating replication state for {}: {}", master_id, e),
+            })?;
+        Ok(())
+    }
+
+    async fn generate_audit_report(&self) -> Result<CatalogAuditReport, StorageError> {
+        let pipeline = vec![doc! {
+            "$facet": {
+                "total": [ doc! { "$count": "count" } ],
+                "extensions": [
+                    doc! { "$group": { "_id": "$file_context.extension", "count": { "$sum": 1 } } },
+                    doc! { "$sort": { "count": -1 } }
+                ],
+                "copied_to_master": [
+                    doc! { "$match": { "dedup.status": "CanonicalMaster" } },
+                    doc! { "$count": "count" }
+                ],
+                "total_replicas": [
+                    doc! { "$match": { "dedup.status": "ReplicaKeep" } },
+                    doc! { "$count": "count" }
+                ],
+                "replica_counts": [
+                    doc! { "$match": { "dedup.status": "ReplicaKeep" } },
+                    doc! { "$group": {
+                        "_id": { "$ifNull": [ "$dedup.drive_id", "unassigned" ] },
+                        "count": { "$sum": 1 }
+                    } },
+                    doc! { "$sort": { "count": -1 } }
+                ],
+                "yet_to_replicate": [
+                    doc! { "$match": {
+                        "dedup.status": "CanonicalMaster",
+                        "dedup.replication.status": { "$in": ["Pending", "PartiallyReplicated"] }
+                    } },
+                    doc! { "$count": "count" }
+                ],
+                "duplicates": [
+                    doc! { "$match": {
+                        "dedup.status": { "$in": ["MarkForRemoval", "Removed"] }
+                    } },
+                    doc! { "$count": "count" }
+                ],
+                "marked_for_delete": [
+                    doc! { "$match": { "dedup.status": "MarkForRemoval" } },
+                    doc! { "$count": "count" }
+                ],
+                "missing_exif": [
+                    doc! { "$match": { "temporal.source": "FileSystemModified" } },
+                    doc! { "$count": "count" }
+                ],
+                "problems": [
+                    doc! { "$match": {
+                        "$or": [
+                            { "extraction_status.status": "Failed" },
+                            { "extraction_status.error_message": { "$ne": Bson::Null } }
+                        ]
+                    } },
+                    doc! { "$count": "count" }
+                ],
+                "unmastered": [
+                    doc! { "$match": { "dedup.status": "NeedsIngestToMaster" } },
+                    doc! { "$count": "count" }
+                ]
+            }
+        }];
+
+        let mut cursor = self
+            .collection
+            .aggregate(pipeline)
+            .await
+            .map_err(|e| StorageError::QueryFailed {
+                collection: self.config.collection_name.clone(),
+                message: format!("Failed executing audit report aggregation: {}", e),
+            })?;
+
+        let facet_doc = cursor
+            .try_next()
+            .await
+            .map_err(|e| StorageError::QueryFailed {
+                collection: self.config.collection_name.clone(),
+                message: format!("Failed reading audit report facet results: {}", e),
+            })?
+            .unwrap_or_default();
+
+        let get_count = |key: &str| -> u64 {
+            facet_doc
+                .get_array(key)
+                .ok()
+                .and_then(|arr| arr.first())
+                .and_then(|b| b.as_document())
+                .and_then(|d| {
+                    d.get_i64("count")
+                        .ok()
+                        .or_else(|| d.get_i32("count").ok().map(|i| i as i64))
+                })
+                .map(|c| c.max(0) as u64)
+                .unwrap_or(0)
+        };
+
+        let total_files = get_count("total");
+        let copied_to_master = get_count("copied_to_master");
+        let total_replicas = get_count("total_replicas");
+        let raw_yet_to_replicate = get_count("yet_to_replicate");
+        let duplicates_detected = get_count("duplicates");
+        let marked_for_delete = get_count("marked_for_delete");
+        let missing_exif = get_count("missing_exif");
+        let problem_files = get_count("problems");
+        let unmastered_files = get_count("unmastered");
+
+        let mut replica_drives = Vec::new();
+        if let Ok(rep_arr) = facet_doc.get_array("replica_counts") {
+            for item in rep_arr {
+                if let Some(d) = item.as_document() {
+                    let drive_id = d.get_str("_id").unwrap_or("unassigned").to_string();
+                    let replicated_count = d
+                        .get_i64("count")
+                        .ok()
+                        .or_else(|| d.get_i32("count").ok().map(|i| i as i64))
+                        .unwrap_or(0)
+                        .max(0) as u64;
+                    let pending_count = copied_to_master.saturating_sub(replicated_count);
+                    replica_drives.push(ReplicaDriveCount {
+                        drive_id,
+                        replicated_count,
+                        pending_count,
+                    });
+                }
+            }
+        }
+
+        // Compute yet_to_replicate taking itemized replica backups into account
+        let yet_to_replicate = if !replica_drives.is_empty() {
+            replica_drives.iter().map(|d| d.pending_count).max().unwrap_or(0)
+        } else {
+            raw_yet_to_replicate.min(copied_to_master)
+        };
+
+        let mut extension_counts = Vec::new();
+        if let Ok(ext_arr) = facet_doc.get_array("extensions") {
+            for item in ext_arr {
+                if let Some(d) = item.as_document() {
+                    let ext = d.get_str("_id").unwrap_or("[unknown]").to_string();
+                    let count = d
+                        .get_i64("count")
+                        .ok()
+                        .or_else(|| d.get_i32("count").ok().map(|i| i as i64))
+                        .unwrap_or(0)
+                        .max(0) as u64;
+                    let percentage = if total_files > 0 {
+                        (count as f64 / total_files as f64) * 100.0
+                    } else {
+                        0.0
+                    };
+                    extension_counts.push(ExtensionCount {
+                        extension: if ext.trim().is_empty() {
+                            "[none]".to_string()
+                        } else {
+                            ext
+                        },
+                        count,
+                        percentage,
+                    });
+                }
+            }
+        }
+
+        Ok(CatalogAuditReport {
+            total_files,
+            extension_counts,
+            copied_to_master,
+            total_replicas,
+            replica_drives,
+            yet_to_replicate,
+            duplicates_detected,
+            marked_for_delete,
+            missing_exif,
+            problem_files,
+            unmastered_files,
+            generated_at: Utc::now(),
+            recommended_action: None,
+            samples: None,
+        })
+    }
+
+    async fn query_inspection_samples(
+        &self,
+        category: InspectionCategory,
+        limit: usize,
+    ) -> Result<Vec<InspectionSample>, StorageError> {
+        let filter = match category {
+            InspectionCategory::Problems => doc! {
+                "$or": [
+                    { "extraction_status.status": "Failed" },
+                    { "extraction_status.error_message": { "$ne": Bson::Null } }
+                ]
+            },
+            InspectionCategory::MissingExif => doc! {
+                "temporal.source": "FileSystemModified"
+            },
+            InspectionCategory::Duplicates => doc! {
+                "dedup.status": { "$in": ["MarkForRemoval", "Removed"] }
+            },
+            InspectionCategory::YetToReplicate => doc! {
+                "dedup.status": "CanonicalMaster",
+                "dedup.replication.status": { "$in": ["Pending", "PartiallyReplicated"] }
+            },
+            InspectionCategory::MarkedForDelete => doc! {
+                "dedup.status": "MarkForRemoval"
+            },
+            InspectionCategory::Unmastered => doc! {
+                "dedup.status": "NeedsIngestToMaster"
+            },
+            InspectionCategory::Replicas => doc! {
+                "dedup.status": "ReplicaKeep"
+            },
+        };
+
+        let find_options = FindOptions::builder()
+            .limit(limit as i64)
+            .projection(doc! {
+                "id": 1,
+                "file_context.file_path": 1,
+                "file_context.file_size_bytes": 1,
+                "file_context.extension": 1,
+                "extraction_status": 1,
+                "dedup": 1,
+                "temporal": 1,
+            })
+            .build();
+
+        let mut cursor = self
+            .collection
+            .find(filter)
+            .with_options(find_options)
+            .await
+            .map_err(|e| StorageError::QueryFailed {
+                collection: self.config.collection_name.clone(),
+                message: format!("Failed querying inspection samples for {}: {}", category, e),
+            })?;
+
+        let mut samples = Vec::new();
+        while let Some(doc) = cursor
+            .try_next()
+            .await
+            .map_err(|e| StorageError::QueryFailed {
+                collection: self.config.collection_name.clone(),
+                message: format!("Failed reading inspection sample document: {}", e),
+            })?
+        {
+            let id = doc
+                .get_str("id")
+                .ok()
+                .and_then(|s| uuid::Uuid::parse_str(s).ok())
+                .unwrap_or_else(uuid::Uuid::new_v4);
+
+            let file_context = doc.get_document("file_context").ok();
+            let file_path = file_context
+                .and_then(|fc| fc.get_str("file_path").ok())
+                .map(std::path::PathBuf::from)
+                .unwrap_or_default();
+            let file_size_bytes = file_context
+                .and_then(|fc| {
+                    fc.get_i64("file_size_bytes")
+                        .ok()
+                        .or_else(|| fc.get_i32("file_size_bytes").ok().map(|i| i as i64))
+                })
+                .unwrap_or(0)
+                .max(0) as u64;
+            let extension = file_context
+                .and_then(|fc| fc.get_str("extension").ok())
+                .unwrap_or("[unknown]")
+                .to_string();
+
+            let diagnostic_detail = match category {
+                InspectionCategory::Problems => doc
+                    .get_document("extraction_status")
+                    .ok()
+                    .and_then(|es| es.get_str("error_message").ok())
+                    .map(|s| s.to_string()),
+                InspectionCategory::MissingExif => {
+                    Some("Capture date missing; fallback to filesystem mtime".to_string())
+                }
+                InspectionCategory::Duplicates => doc
+                    .get_document("dedup")
+                    .ok()
+                    .and_then(|d| d.get_str("canonical_master_path").ok())
+                    .map(|p| format!("Duplicate of canonical master at {}", p)),
+                InspectionCategory::YetToReplicate => doc
+                    .get_document("dedup")
+                    .ok()
+                    .and_then(|d| d.get_document("replication").ok())
+                    .and_then(|r| r.get_array("pending_drives").ok())
+                    .map(|arr| {
+                        let drives: Vec<&str> = arr.iter().filter_map(|b| b.as_str()).collect();
+                        format!("Pending replica drives: [{}]", drives.join(", "))
+                    }),
+                InspectionCategory::MarkedForDelete => doc
+                    .get_document("dedup")
+                    .ok()
+                    .and_then(|d| d.get_str("canonical_master_path").ok())
+                    .map(|p| format!("Pending prune; verified copy at {}", p)),
+                InspectionCategory::Unmastered => Some(
+                    "Scanned from secondary storage; awaiting ingestion into master directory"
+                        .to_string(),
+                ),
+                InspectionCategory::Replicas => {
+                    let drive_id = doc
+                        .get_document("dedup")
+                        .ok()
+                        .and_then(|d| d.get_str("drive_id").ok())
+                        .unwrap_or("unknown");
+                    let master_path = doc
+                        .get_document("dedup")
+                        .ok()
+                        .and_then(|d| d.get_str("canonical_master_path").ok())
+                        .unwrap_or("unknown");
+                    Some(format!(
+                        "Replica copy on drive '{}'; canonical master at {}",
+                        drive_id, master_path
+                    ))
+                }
+            };
+
+            samples.push(InspectionSample {
+                id,
+                file_path,
+                file_size_bytes,
+                extension,
+                category,
+                diagnostic_detail,
+            });
+        }
+
+        Ok(samples)
     }
 }
 
