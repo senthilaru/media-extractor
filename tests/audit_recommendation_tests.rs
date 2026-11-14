@@ -48,7 +48,7 @@ fn test_recommendation_priority_prune() {
     let report = create_test_report(0, 0, 7, 1, 3);
     let rec = AuditService::evaluate_recommendation(&report);
     assert_eq!(rec.priority, 3);
-    assert_eq!(rec.command, "cargo run -- organize");
+    assert_eq!(rec.command, "cargo run -- dedup prune --execute");
 }
 
 #[test]

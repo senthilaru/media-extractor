@@ -1052,7 +1052,7 @@ async fn test_prune_drive_verifies_and_purges_redundant_aae_sidecar() {
             &sink,
             &config,
             DrivePrunerOptions {
-                drive_identifier: "unorganized".to_string(),
+                drive_identifier: Some("unorganized".to_string()),
                 execute: true,
                 require_master_disk: true,
                 manifest_out: None,

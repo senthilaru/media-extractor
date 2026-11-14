@@ -1489,7 +1489,7 @@ async fn test_ingest_5_copies_cluster_registers_master_and_links_all_duplicates_
     // Verify that DrivePruningService generates manifest for all 5 duplicates with zero warnings
     let pruner = metadata_extractor::application::drive_pruner::DrivePruningService::new();
     let manifest = pruner
-        .generate_manifest(&sink, &config, "samples", true)
+        .generate_manifest(&sink, &config, Some("samples"), true)
         .await
         .unwrap();
     assert_eq!(manifest.total_files_to_remove, 5);

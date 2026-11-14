@@ -71,10 +71,30 @@ pub struct PruneExecutionReport {
 /// Options configuring a drive pruning operation.
 #[derive(Debug, Clone)]
 pub struct DrivePrunerOptions {
-    pub drive_identifier: String,
+    pub drive_identifier: Option<String>,
     pub execute: bool,
     pub require_master_disk: bool,
     pub manifest_out: Option<PathBuf>,
+}
+
+impl DrivePrunerOptions {
+    pub fn for_drive(drive: impl Into<String>, execute: bool) -> Self {
+        Self {
+            drive_identifier: Some(drive.into()),
+            execute,
+            require_master_disk: false,
+            manifest_out: None,
+        }
+    }
+
+    pub fn for_all_drives(execute: bool) -> Self {
+        Self {
+            drive_identifier: None,
+            execute,
+            require_master_disk: false,
+            manifest_out: None,
+        }
+    }
 }
 
 /// Service orchestrating drive-by-drive duplicate pruning with pre-deletion master verification.
@@ -149,34 +169,40 @@ impl DrivePruningService {
         })
     }
 
-    /// Generates a removal manifest for the specified drive by querying MongoDB.
+    /// Generates a removal manifest for the specified drive (or all drives if None) by querying MongoDB.
     pub async fn generate_manifest(
         &self,
         sink: &dyn MetadataStorageSink,
         config: &DriveConfiguration,
-        drive_identifier: &str,
+        drive_identifier: Option<&str>,
         require_master_disk: bool,
     ) -> Result<DriveRemovalManifest, DeduplicationError> {
         let guard = ArchiveProtectionGuard::from_config(config);
 
-        // Layer 1: Fail fast if target drive identifier or path corresponds to protected archive
-        guard.validate_prune_target(drive_identifier, config)?;
+        let (drive_id, mount_path, drive_group, mount_filter) = if let Some(ident) = drive_identifier {
+            // Layer 1: Fail fast if target drive identifier or path corresponds to protected archive
+            guard.validate_prune_target(ident, config)?;
 
-        let drive = Self::resolve_drive_or_path(config, drive_identifier)?;
-        ArchiveProtectionGuard::validate_drive_definition(&drive)?;
+            let drive = Self::resolve_drive_or_path(config, ident)?;
+            ArchiveProtectionGuard::validate_drive_definition(&drive)?;
 
-        if guard.is_protected_path(&drive.mount_path) {
-            return Err(DeduplicationError::PruneForbiddenOnProtectedArchive {
-                drive: drive.id.clone(),
-                path: drive.mount_path.clone(),
-                reason:
-                    "Pruning is strictly forbidden on protected canonical master archive storage."
-                        .to_string(),
-            });
-        }
+            if guard.is_protected_path(&drive.mount_path) {
+                return Err(DeduplicationError::PruneForbiddenOnProtectedArchive {
+                    drive: drive.id.clone(),
+                    path: drive.mount_path.clone(),
+                    reason:
+                        "Pruning is strictly forbidden on protected canonical master archive storage."
+                            .to_string(),
+                });
+            }
 
-        let mount_str = drive.mount_path.to_string_lossy();
-        let candidates = sink.query_removal_candidates(Some(&mount_str)).await?;
+            let mount_str = drive.mount_path.to_string_lossy().to_string();
+            (drive.id.clone(), drive.mount_path.clone(), drive.group.clone(), Some(mount_str))
+        } else {
+            ("all".to_string(), PathBuf::from("(All Catalog Drives)"), "all".to_string(), None)
+        };
+
+        let candidates = sink.query_removal_candidates(mount_filter.as_deref()).await?;
 
         // Preload canonical masters to verify masters by ID, hash, or canonical path
         let canonical_masters = sink.query_canonical_masters().await.unwrap_or_default();
@@ -464,6 +490,7 @@ impl DrivePruningService {
                 canonical_master_path: master_path,
                 file_size_bytes: doc.file_context.file_size_bytes,
                 master_exists_verified: master_verified,
+                scanned_root: Some(doc.file_context.scanned_root),
             };
 
             total_reclaimable_bytes += task.file_size_bytes;
@@ -471,9 +498,9 @@ impl DrivePruningService {
         }
 
         Ok(DriveRemovalManifest {
-            drive_id: drive.id.clone(),
-            mount_path: drive.mount_path.clone(),
-            drive_group: drive.group.clone(),
+            drive_id,
+            mount_path,
+            drive_group,
             total_files_to_remove: tasks.len(),
             total_reclaimable_bytes,
             removal_tasks: tasks,
@@ -488,13 +515,15 @@ impl DrivePruningService {
         options: DrivePrunerOptions,
     ) -> Result<PruneExecutionReport, DeduplicationError> {
         let guard = ArchiveProtectionGuard::from_config(config);
-        guard.validate_prune_target(&options.drive_identifier, config)?;
+        if let Some(ref drive_id) = options.drive_identifier {
+            guard.validate_prune_target(drive_id, config)?;
+        }
 
         let manifest = self
             .generate_manifest(
                 sink,
                 config,
-                &options.drive_identifier,
+                options.drive_identifier.as_deref(),
                 options.require_master_disk,
             )
             .await?;
@@ -619,25 +648,76 @@ impl DrivePruningService {
         }
 
         // Clean up empty ancestor directories
-        let (empty_dirs_count, dir_errors) = Self::clean_empty_ancestor_directories(
-            &manifest.mount_path,
-            &affected_file_paths,
-            &guard,
-            options.execute,
-        );
+        let (empty_dirs_count, dir_errors) = if options.drive_identifier.is_some() {
+            Self::clean_empty_ancestor_directories(
+                &manifest.mount_path,
+                &affected_file_paths,
+                &guard,
+                options.execute,
+            )
+        } else {
+            // Group affected file paths by their prune root
+            let mut path_to_root: std::collections::HashMap<PathBuf, PathBuf> =
+                std::collections::HashMap::new();
+            for task in &manifest.removal_tasks {
+                if let Some(root) = Self::resolve_file_prune_root(
+                    &task.target_file_path,
+                    task.scanned_root.as_deref(),
+                    config,
+                    &guard,
+                ) {
+                    path_to_root.insert(task.target_file_path.clone(), root);
+                }
+            }
+
+            let mut paths_by_root: std::collections::HashMap<PathBuf, Vec<PathBuf>> =
+                std::collections::HashMap::new();
+            for path in &affected_file_paths {
+                if let Some(root) = path_to_root.get(path) {
+                    paths_by_root
+                        .entry(root.clone())
+                        .or_default()
+                        .push(path.clone());
+                } else if let Some(parent) = path.parent() {
+                    if !guard.is_protected_path(parent) {
+                        paths_by_root
+                            .entry(parent.to_path_buf())
+                            .or_default()
+                            .push(path.clone());
+                    }
+                }
+            }
+
+            let mut total_empty = 0usize;
+            let mut errs = Vec::new();
+            for (root, paths) in paths_by_root {
+                let (cnt, sub_errs) = Self::clean_empty_ancestor_directories(
+                    &root,
+                    &paths,
+                    &guard,
+                    options.execute,
+                );
+                total_empty += cnt;
+                errs.extend(sub_errs);
+            }
+            (total_empty, errs)
+        };
         errors.extend(dir_errors);
 
         // Purge any pre-existing records on target drive currently marked "Removed"
         if options.execute {
-            let mount_str = manifest.mount_path.to_string_lossy();
-            match sink.purge_removed_records(Some(&mount_str)).await {
+            let mount_filter = if options.drive_identifier.is_some() {
+                Some(manifest.mount_path.to_string_lossy().to_string())
+            } else {
+                None
+            };
+            match sink.purge_removed_records(mount_filter.as_deref()).await {
                 Ok(cleaned) => {
                     records_purged += cleaned;
                 }
                 Err(e) => {
                     errors.push(format!(
-                        "Failed purging historical removed records on '{}': {}",
-                        manifest.mount_path.display(),
+                        "Failed purging historical removed records: {}",
                         e
                     ));
                 }
@@ -812,5 +892,44 @@ impl DrivePruningService {
         }
 
         (removed_count, errors)
+    }
+
+    /// Resolves the boundary prune root for a given file path when pruning across all drives.
+    pub fn resolve_file_prune_root(
+        file_path: &Path,
+        scanned_root: Option<&Path>,
+        config: &DriveConfiguration,
+        guard: &ArchiveProtectionGuard,
+    ) -> Option<PathBuf> {
+        // 1. Prefer scanned_root if valid, prefixes file, and not protected
+        if let Some(root) = scanned_root {
+            if !guard.is_protected_path(root) && file_path.starts_with(root) {
+                return Some(root.to_path_buf());
+            }
+        }
+
+        // 2. Check if file matches any configured non-protected drive mount path
+        let mut matching_drives: Vec<&DriveDefinition> = config
+            .drives
+            .iter()
+            .filter(|d| !guard.is_protected_path(&d.mount_path) && file_path.starts_with(&d.mount_path))
+            .collect();
+        matching_drives.sort_by_key(|d| std::cmp::Reverse(d.mount_path.as_os_str().len()));
+        if let Some(drive) = matching_drives.first() {
+            return Some(drive.mount_path.clone());
+        }
+
+        // 3. If macOS /Volumes/<drive>, stop at /Volumes/<drive>
+        if file_path.starts_with("/Volumes") {
+            let components: Vec<_> = file_path.components().collect();
+            if components.len() >= 3 {
+                let vol_path: PathBuf = components[..3].iter().collect();
+                if !guard.is_protected_path(&vol_path) {
+                    return Some(vol_path);
+                }
+            }
+        }
+
+        None
     }
 }

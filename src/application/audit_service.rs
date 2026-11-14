@@ -101,7 +101,7 @@ impl AuditService {
                     "{} duplicate media files are marked for safe pruning",
                     report.marked_for_delete
                 ),
-                command: "cargo run -- organize".to_string(),
+                command: "cargo run -- dedup prune --execute".to_string(),
             }
         } else if report.problem_files > 0 {
             CommandRecommendation {

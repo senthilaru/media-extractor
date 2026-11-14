@@ -393,7 +393,7 @@ async fn test_drive_pruner_manifest_and_safety_checks() {
     // Test Dry-Run Pruning
     let manifest_path = temp_root.path().join("manifest.json");
     let dry_run_opts = DrivePrunerOptions {
-        drive_identifier: "drive_3".to_string(),
+        drive_identifier: Some("drive_3".to_string()),
         execute: false,
         require_master_disk: false,
         manifest_out: Some(manifest_path.clone()),
@@ -416,7 +416,7 @@ async fn test_drive_pruner_manifest_and_safety_checks() {
 
     // Test Execute Pruning
     let exec_opts = DrivePrunerOptions {
-        drive_identifier: "drive_3".to_string(),
+        drive_identifier: Some("drive_3".to_string()),
         execute: true,
         require_master_disk: false,
         manifest_out: None,
@@ -529,7 +529,7 @@ async fn test_drive_pruner_fallback_to_hash_verification() {
         .unwrap();
 
     let exec_opts = DrivePrunerOptions {
-        drive_identifier: "staging".to_string(),
+        drive_identifier: Some("staging".to_string()),
         execute: true,
         require_master_disk: true,
         manifest_out: None,
@@ -620,7 +620,7 @@ async fn test_prune_drive_rejects_primary_and_replica_targets() {
     let master_path = primary_dir.join("media/master");
     std::fs::create_dir_all(&master_path).unwrap();
     let opts_primary_master = DrivePrunerOptions {
-        drive_identifier: master_path.to_str().unwrap().to_string(),
+        drive_identifier: Some(master_path.to_str().unwrap().to_string()),
         execute: false,
         require_master_disk: false,
         manifest_out: None,
@@ -642,7 +642,7 @@ async fn test_prune_drive_rejects_primary_and_replica_targets() {
     let replica_master_path = replica_dir.join("media/master");
     std::fs::create_dir_all(&replica_master_path).unwrap();
     let opts_replica_master = DrivePrunerOptions {
-        drive_identifier: replica_master_path.to_str().unwrap().to_string(),
+        drive_identifier: Some(replica_master_path.to_str().unwrap().to_string()),
         execute: false,
         require_master_disk: false,
         manifest_out: None,
@@ -664,7 +664,7 @@ async fn test_prune_drive_rejects_primary_and_replica_targets() {
     let unorg_path = primary_dir.join("unorganized");
     std::fs::create_dir_all(&unorg_path).unwrap();
     let opts_unorg = DrivePrunerOptions {
-        drive_identifier: unorg_path.to_str().unwrap().to_string(),
+        drive_identifier: Some(unorg_path.to_str().unwrap().to_string()),
         execute: false,
         require_master_disk: false,
         manifest_out: None,
@@ -677,7 +677,7 @@ async fn test_prune_drive_rejects_primary_and_replica_targets() {
 
     // 4. Target primary drive ID where mount_path != master_path -> ALLOWED
     let opts_primary_drive = DrivePrunerOptions {
-        drive_identifier: "primary_main".to_string(),
+        drive_identifier: Some("primary_main".to_string()),
         execute: false,
         require_master_disk: false,
         manifest_out: None,
@@ -739,7 +739,7 @@ async fn test_generate_manifest_disqualifies_protected_archive_candidates() {
 
     // Generate manifest for staging
     let manifest = service
-        .generate_manifest(&sink, &config, "staging", false)
+        .generate_manifest(&sink, &config, Some("staging"), false)
         .await
         .unwrap();
 
@@ -838,7 +838,7 @@ async fn test_prune_drive_hard_deletes_database_records() {
 
     // Execute prune
     let opts = DrivePrunerOptions {
-        drive_identifier: "staging".to_string(),
+        drive_identifier: Some("staging".to_string()),
         execute: true,
         require_master_disk: true,
         manifest_out: None,
@@ -906,7 +906,7 @@ async fn test_prune_drive_purges_preexisting_removed_records() {
 
     // Execute prune on staging
     let opts = DrivePrunerOptions {
-        drive_identifier: "staging".to_string(),
+        drive_identifier: Some("staging".to_string()),
         execute: true,
         require_master_disk: false,
         manifest_out: None,
@@ -990,7 +990,7 @@ async fn test_prune_drive_cleans_empty_ancestor_directories_and_preserves_root()
 
     // Target the specific directory: unorganized_photos
     let opts = DrivePrunerOptions {
-        drive_identifier: unorganized_photos.to_string_lossy().to_string(),
+        drive_identifier: Some(unorganized_photos.to_string_lossy().to_string()),
         execute: true,
         require_master_disk: true,
         manifest_out: None,
@@ -1085,7 +1085,7 @@ async fn test_prune_drive_dry_run_simulates_empty_directories() {
     sink.save_batch(&[master_doc, dup_doc]).await.unwrap();
 
     let opts = DrivePrunerOptions {
-        drive_identifier: unorganized_photos.to_string_lossy().to_string(),
+        drive_identifier: Some(unorganized_photos.to_string_lossy().to_string()),
         execute: false, // DRY-RUN
         require_master_disk: true,
         manifest_out: None,
@@ -1102,4 +1102,139 @@ async fn test_prune_drive_dry_run_simulates_empty_directories() {
     assert!(dup_file.exists());
     assert!(nested_trip.exists());
     assert!(unorganized_photos.join("2022").exists());
+}
+
+#[tokio::test]
+async fn test_prune_all_drives_without_drive_parameter() {
+    let tmp = tempdir().unwrap();
+    let primary_dir = tmp.path().join("primary");
+    let replica_dir = tmp.path().join("replica");
+    let staging1_dir = tmp.path().join("staging1");
+    let staging2_dir = tmp.path().join("staging2");
+
+    std::fs::create_dir_all(&primary_dir).unwrap();
+    std::fs::create_dir_all(&replica_dir).unwrap();
+    std::fs::create_dir_all(&staging1_dir).unwrap();
+    std::fs::create_dir_all(&staging2_dir).unwrap();
+
+    let mut groups = HashMap::new();
+    groups.insert("primary".to_string(), DriveGroupSpec { priority: 100, description: None });
+    groups.insert("replica".to_string(), DriveGroupSpec { priority: 80, description: None });
+    groups.insert("source1".to_string(), DriveGroupSpec { priority: 20, description: None });
+    groups.insert("source2".to_string(), DriveGroupSpec { priority: 10, description: None });
+
+    let config = DriveConfiguration {
+        version: "1.0".to_string(),
+        groups,
+        drives: vec![
+            DriveDefinition {
+                id: "primary_main".to_string(),
+                mount_path: primary_dir.clone(),
+                master_path: primary_dir.join("media/master"),
+                group: "primary".to_string(),
+            },
+            DriveDefinition {
+                id: "replica_1".to_string(),
+                mount_path: replica_dir.clone(),
+                master_path: replica_dir.join("media/master"),
+                group: "replica".to_string(),
+            },
+            DriveDefinition {
+                id: "staging_1".to_string(),
+                mount_path: staging1_dir.clone(),
+                master_path: staging1_dir.clone(),
+                group: "source1".to_string(),
+            },
+            DriveDefinition {
+                id: "staging_2".to_string(),
+                mount_path: staging2_dir.clone(),
+                master_path: staging2_dir.clone(),
+                group: "source2".to_string(),
+            },
+        ],
+        rules: DriveRules::default(),
+    };
+
+    // Master file on primary
+    let master_file = primary_dir.join("media/master/2023/01-Jan-2023/Photos/photo.jpg");
+    std::fs::create_dir_all(master_file.parent().unwrap()).unwrap();
+    std::fs::write(&master_file, b"canonical master bitstream content").unwrap();
+
+    // Duplicate 1 on staging1
+    let dup1_file = staging1_dir.join("dup1.jpg");
+    std::fs::write(&dup1_file, b"canonical master bitstream content").unwrap();
+
+    // Duplicate 2 on staging2
+    let dup2_file = staging2_dir.join("subfolder/dup2.jpg");
+    std::fs::create_dir_all(dup2_file.parent().unwrap()).unwrap();
+    std::fs::write(&dup2_file, b"canonical master bitstream content").unwrap();
+
+    let sink = MockPruneStorageSink::default();
+    let service = DrivePruningService::new();
+
+    let master_id = Uuid::new_v4();
+    let master_doc = create_doc_with_dedup(
+        master_id,
+        master_file.clone(),
+        35,
+        DeduplicationStatus::CanonicalMaster,
+        None,
+        None,
+    );
+
+    let dup1_id = Uuid::new_v4();
+    let dup1_doc = create_doc_with_dedup(
+        dup1_id,
+        dup1_file.clone(),
+        35,
+        DeduplicationStatus::MarkForRemoval,
+        Some(master_id),
+        Some(master_file.clone()),
+    );
+
+    let dup2_id = Uuid::new_v4();
+    let dup2_doc = create_doc_with_dedup(
+        dup2_id,
+        dup2_file.clone(),
+        35,
+        DeduplicationStatus::MarkForRemoval,
+        Some(master_id),
+        Some(master_file.clone()),
+    );
+
+    sink.save_batch(&[master_doc, dup1_doc, dup2_doc]).await.unwrap();
+
+    // 1. Dry run across all catalog drives (drive_identifier: None)
+    let dry_opts = DrivePrunerOptions::for_all_drives(false);
+    let dry_report = service.prune_drive(&sink, &config, dry_opts).await.unwrap();
+
+    assert!(dry_report.is_dry_run);
+    assert_eq!(dry_report.drive_id, "all");
+    assert_eq!(dry_report.total_candidates, 2);
+    assert_eq!(dry_report.verified_masters, 2);
+    assert_eq!(dry_report.files_deleted, 0);
+    assert!(dup1_file.exists());
+    assert!(dup2_file.exists());
+
+    // 2. Execute prune across all catalog drives (drive_identifier: None)
+    let mut exec_opts = DrivePrunerOptions::for_all_drives(true);
+    exec_opts.require_master_disk = true;
+    let exec_report = service.prune_drive(&sink, &config, exec_opts).await.unwrap();
+
+    assert!(!exec_report.is_dry_run);
+    assert_eq!(exec_report.drive_id, "all");
+    assert_eq!(exec_report.total_candidates, 2);
+    assert_eq!(exec_report.files_deleted, 2);
+    assert_eq!(exec_report.records_purged, 2);
+    assert_eq!(exec_report.errors.len(), 0);
+
+    // Files deleted from disk
+    assert!(!dup1_file.exists(), "dup1 should be deleted from staging1");
+    assert!(!dup2_file.exists(), "dup2 should be deleted from staging2");
+    assert!(master_file.exists(), "master file must remain untouched");
+
+    // Database records purged
+    assert!(sink.find_document_by_id(dup1_id).await.unwrap().is_none());
+    assert!(sink.find_document_by_id(dup2_id).await.unwrap().is_none());
+    assert!(sink.find_document_by_id(master_id).await.unwrap().is_some());
 }

@@ -278,7 +278,7 @@ impl OrganizePipelineService {
 
             let pruner_service = DrivePruningService::new();
             let pruner_options = DrivePrunerOptions {
-                drive_identifier: source_str,
+                drive_identifier: Some(source_str),
                 execute: !options.dry_run,
                 require_master_disk: true,
                 manifest_out: None,

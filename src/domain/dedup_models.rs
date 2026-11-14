@@ -475,6 +475,8 @@ pub struct DriveRemovalTask {
     pub canonical_master_path: PathBuf,
     pub file_size_bytes: u64,
     pub master_exists_verified: bool,
+    #[serde(default)]
+    pub scanned_root: Option<PathBuf>,
 }
 
 /// Per-drive removal manifest for guided cleanup.

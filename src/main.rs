@@ -397,9 +397,9 @@ enum DedupSubcommands {
 
 #[derive(Parser, Debug)]
 struct PruneArgs {
-    /// Drive ID or mount path to prune (e.g. wd_14tb_primary or /Volumes/SP-1)
-    #[arg(short = 'd', long, required = true)]
-    drive: String,
+    /// Drive ID or mount path to prune (optional: if omitted, prunes all marked duplicates across all cataloged drives in the database)
+    #[arg(short = 'd', long)]
+    drive: Option<String>,
 
     /// Path to drive configuration YAML/TOML file
     #[arg(
@@ -1251,9 +1251,11 @@ async fn run_dedup_prune(args: PruneArgs) -> Result<(), Box<dyn std::error::Erro
         metadata_extractor::infrastructure::archive_guard::ArchiveProtectionGuard::from_config(
             &drive_config,
         );
-    if let Err(e) = guard.validate_prune_target(&args.drive, &drive_config) {
-        eprintln!("Error: {}", e);
-        std::process::exit(1);
+    if let Some(ref drive) = args.drive {
+        if let Err(e) = guard.validate_prune_target(drive, &drive_config) {
+            eprintln!("Error: {}", e);
+            std::process::exit(1);
+        }
     }
 
     let db_config = resolve_db_config(args.mongodb_uri, args.collection);
@@ -1276,11 +1278,15 @@ async fn run_dedup_prune(args: PruneArgs) -> Result<(), Box<dyn std::error::Erro
     let report = service.prune_drive(&sink, &drive_config, options).await?;
 
     if report.is_dry_run {
-        println!(
-            "[DRY-RUN] Pruning preview for drive: {} ({})",
-            report.drive_id,
-            report.mount_path.display()
-        );
+        if report.drive_id == "all" {
+            println!("[DRY-RUN] Pruning preview for all cataloged drives in database");
+        } else {
+            println!(
+                "[DRY-RUN] Pruning preview for drive: {} ({})",
+                report.drive_id,
+                report.mount_path.display()
+            );
+        }
         println!("Candidates Marked for Removal: {}", report.total_candidates);
         println!("Verified Canonical Masters:    {}", report.verified_masters);
         println!(
@@ -1300,11 +1306,15 @@ async fn run_dedup_prune(args: PruneArgs) -> Result<(), Box<dyn std::error::Erro
         println!();
         println!("Zero files were deleted. Re-run with `--execute` to delete redundant copies and purge obsolete database records.");
     } else {
-        println!(
-            "[EXECUTED] Pruned redundant duplicates on drive: {} ({})",
-            report.drive_id,
-            report.mount_path.display()
-        );
+        if report.drive_id == "all" {
+            println!("[EXECUTED] Pruned redundant duplicates across all cataloged drives in database");
+        } else {
+            println!(
+                "[EXECUTED] Pruned redundant duplicates on drive: {} ({})",
+                report.drive_id,
+                report.mount_path.display()
+            );
+        }
         println!("Files Deleted:                 {}", report.files_deleted);
         println!(
             "Empty Directories Removed:     {}",
