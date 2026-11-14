@@ -48,20 +48,43 @@ Re-connect Drives 1-by-1 <────────── Reclaim Terabytes of Di
      db.media_assets.find({ "dedup.status": "MarkForRemoval" }, { "file_context.file_path": 1, "dedup.canonical_master_path": 1 });
      ```
 3. **Step 3: Deduplicate and Consolidate Cleanly**
-   - Connect your external hard drives back one by one to prune marked duplicates, ingest missing files, or synchronize replicas:
+   - Ingest pending files, synchronize replicas, and prune marked duplicates across all drives directly from MongoDB without needing to pass drive arguments:
      ```bash
-     # Ingest unmastered files from any external drive or local folder into the primary master structure:
-     # (--source-drive accepts any external drive mount path, local directory, or drive ID; no preconfiguration required)
-     ./target/release/metadata-extractor ingest --source-drive /Volumes/USB_STICK -c drives.yaml
+     # Ingest all unmastered files directly from the database into the primary master structure:
+     # (Omit --source-drive to ingest all pending assets cataloged in MongoDB, or pass a specific source path/ID)
+     ./target/release/metadata-extractor ingest -c drives.yaml
 
      # Ingest AND automatically fan out new canonical masters to all mounted replica drives:
-     ./target/release/metadata-extractor ingest --source-drive /Volumes/USB_STICK --replicate -c drives.yaml
+     ./target/release/metadata-extractor ingest --replicate -c drives.yaml
 
      # Mirror all canonical masters from primary master to all connected replica backup drives:
      ./target/release/metadata-extractor sync-replicas -c drives.yaml
 
-     # Prune marked duplicates on a secondary drive to reclaim disk space:
+     # Prune marked duplicates across all cataloged drives directly from MongoDB (Safe Dry Run Preview):
+     # (Omit --drive to automatically evaluate and prune duplicate candidates across all configured drives)
+     ./target/release/metadata-extractor dedup prune -c drives.yaml
+
+     # Execute deletion across all drives, reclaiming storage and purging obsolete DB records:
+     ./target/release/metadata-extractor dedup prune -c drives.yaml --execute
+
+     # (Optional) Prune a specific secondary drive only:
      ./target/release/metadata-extractor dedup prune --drive wd_backup -c drives.yaml --execute
+     ```
+
+4. **Step 4: Check Catalog Health & Suggested Next Action (`report` / `status` / `audit`)**
+   - Check the overall lifecycle, extension breakdown, replica counts, and suggested next command at any time:
+     ```bash
+     ./target/release/metadata-extractor report
+     # (Or use aliases: status, audit)
+     ```
+   - Inspect top 3 sample filepaths for any status category to manually review files before taking action:
+     ```bash
+     ./target/release/metadata-extractor report inspect duplicates
+     ./target/release/metadata-extractor report inspect marked-for-delete
+     ./target/release/metadata-extractor report inspect unmastered
+     ./target/release/metadata-extractor report inspect unreplicated
+     ./target/release/metadata-extractor report inspect problems
+     ./target/release/metadata-extractor report inspect missing-exif
      ```
 
 > 💡 **Looking for API schemas, duplicate detection algorithms, subcommands, or MongoDB query recipes?**  

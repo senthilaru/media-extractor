@@ -190,10 +190,58 @@ impl ArchiveProtectionGuard {
         }
 
         debug!(path = %path.display(), "Executing safe deletion on prunable file");
-        std::fs::remove_file(path).map_err(|e| DeduplicationError::PruneIoError {
-            path: path.to_path_buf(),
-            source: e,
-        })
+        match std::fs::remove_file(path) {
+            Ok(_) => Ok(()),
+            Err(_e) => {
+                // If deletion failed due to permission denial or locked attributes (e.g. macOS uchg / read-only),
+                // attempt to unlock and retry deletion once.
+                Self::attempt_unlock_file(path);
+                std::fs::remove_file(path).map_err(|retry_err| DeduplicationError::PruneIoError {
+                    path: path.to_path_buf(),
+                    source: retry_err,
+                })
+            }
+        }
+    }
+
+    /// Attempts to clear read-only permissions and platform-specific immutable / lock flags
+    /// (such as macOS BSD uchg flag) on a file or directory that has already passed the archive protection guard.
+    pub fn attempt_unlock_file(path: &Path) {
+        // 1. Clear read-only permission if set
+        if let Ok(metadata) = std::fs::metadata(path) {
+            let mut perms = metadata.permissions();
+            if perms.readonly() {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let mode = perms.mode() | 0o600;
+                    perms.set_mode(mode);
+                }
+                #[cfg(not(unix))]
+                {
+                    #[allow(clippy::permissions_set_readonly_false)]
+                    perms.set_readonly(false);
+                }
+                let _ = std::fs::set_permissions(path, perms);
+            }
+        }
+
+        // 2. On macOS / Apple platforms, clear BSD user flags (such as uchg / UF_IMMUTABLE)
+        #[cfg(target_os = "macos")]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            if let Ok(c_path) = std::ffi::CString::new(path.as_os_str().as_bytes()) {
+                unsafe {
+                    extern "C" {
+                        fn chflags(
+                            path: *const std::ffi::c_char,
+                            flags: std::ffi::c_uint,
+                        ) -> std::ffi::c_int;
+                    }
+                    chflags(c_path.as_ptr(), 0);
+                }
+            }
+        }
     }
 
     /// Safely canonicalizes a path by resolving symlinks and normalizing `.` and `..` segments.
@@ -459,5 +507,54 @@ mod tests {
             assert!(guard.safe_delete_file(&symlink_path).is_err());
             assert!(file_primary_master.exists());
         }
+    }
+
+    #[test]
+    fn test_safe_delete_locked_uchg_or_readonly_file() {
+        let tmp = tempdir().unwrap();
+        let primary = tmp.path().join("primary");
+        let replica = tmp.path().join("replica");
+        let staging = tmp.path().join("staging");
+
+        std::fs::create_dir_all(&primary).unwrap();
+        std::fs::create_dir_all(&replica).unwrap();
+        std::fs::create_dir_all(&staging).unwrap();
+
+        let locked_file = staging.join("locked_media.jpg");
+        std::fs::write(&locked_file, b"read only or uchg content").unwrap();
+
+        // Make file read-only
+        let mut perms = std::fs::metadata(&locked_file).unwrap().permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&locked_file, perms).unwrap();
+
+        // On macOS, also set uchg flag
+        #[cfg(target_os = "macos")]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            let c_path = std::ffi::CString::new(locked_file.as_os_str().as_bytes()).unwrap();
+            unsafe {
+                extern "C" {
+                    fn chflags(
+                        path: *const std::ffi::c_char,
+                        flags: std::ffi::c_uint,
+                    ) -> std::ffi::c_int;
+                }
+                // UF_IMMUTABLE (uchg) = 0x0002
+                let _ = chflags(c_path.as_ptr(), 0x0002);
+            }
+        }
+
+        let config = make_test_config(&primary, &replica, &staging);
+        let guard = ArchiveProtectionGuard::from_config(&config);
+
+        // Safe delete should unlock and delete the file successfully
+        let res = guard.safe_delete_file(&locked_file);
+        assert!(
+            res.is_ok(),
+            "Expected safe_delete_file to succeed on locked file, got {:?}",
+            res
+        );
+        assert!(!locked_file.exists(), "Locked file should have been deleted");
     }
 }

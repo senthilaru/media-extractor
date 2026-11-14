@@ -86,6 +86,6 @@ cargo run -- report --format json | jq .
 2. When pending replicas exist in database:
    - Output suggests `cargo run -- sync-replicas`
 3. When duplicates awaiting prune exist:
-   - Output suggests `cargo run -- organize`
+   - Output suggests `cargo run -- dedup prune --execute`
 4. When all assets are ingested, replicated, and clean:
    - Output indicates system is fully synchronized and healthy.

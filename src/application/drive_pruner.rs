@@ -43,6 +43,7 @@ fn check_directory_empty(dir: &Path, execute: bool) -> Result<bool, std::io::Err
 
     if execute {
         for f in disposable_files {
+            ArchiveProtectionGuard::attempt_unlock_file(&f);
             let _ = std::fs::remove_file(f);
         }
     }
@@ -797,13 +798,22 @@ impl DrivePruningService {
                                 removed_count += 1;
                                 current = parent.to_path_buf();
                             }
-                            Err(e) => {
-                                tracing::debug!(
-                                    dir = %current.display(),
-                                    error = %e,
-                                    "Directory not removed (may be non-empty or locked)"
-                                );
-                                break;
+                            Err(_) => {
+                                ArchiveProtectionGuard::attempt_unlock_file(&current);
+                                match std::fs::remove_dir(&current) {
+                                    Ok(_) => {
+                                        removed_count += 1;
+                                        current = parent.to_path_buf();
+                                    }
+                                    Err(e) => {
+                                        tracing::debug!(
+                                            dir = %current.display(),
+                                            error = %e,
+                                            "Directory not removed (may be non-empty or locked)"
+                                        );
+                                        break;
+                                    }
+                                }
                             }
                         },
                         Ok(false) => {

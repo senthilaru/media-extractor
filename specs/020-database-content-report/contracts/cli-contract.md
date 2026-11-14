@@ -40,6 +40,7 @@ cargo run -- report inspect <CATEGORY> [--limit <N>]
 - `missing-exif`: Assets without camera/video capture timestamp (fallback to file modification time).
 - `duplicates`: Assets clustered as duplicate copies.
 - `unreplicated`: Canonical master assets pending replica backup.
+- `replicas`: Retained replica mirror copies.
 - `marked-for-delete`: Assets flagged for safe pruning.
 - `unmastered`: Assets needing ingestion into canonical master.
 

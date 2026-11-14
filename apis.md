@@ -19,6 +19,9 @@ For primary setup and the unified command guide, see [README.md](README.md).
    - [dedup prune](#dedup-prune)
    - [dedup-stream](#dedup-stream)
    - [ingest](#ingest)
+   - [sync-replicas](#sync-replicas-alias-replicate)
+   - [report](#report-aliases-status-audit)
+   - [organize](#organize-alias-archive-pipeline)
    - [Multi-Drive Configuration Format (drives.yaml)](#multi-drive-configuration-format-drivesyaml)
 5. [Unix Pipelined Streaming Workflows](#5-unix-pipelined-streaming-workflows)
 6. [Direct MongoDB Ingestion & Query API](#6-direct-mongodb-ingestion--query-api)
@@ -229,8 +232,8 @@ After running `dedup -c drives.yaml`, each media document in the MongoDB collect
 |---|---|---|
 | `CanonicalMaster` | The definitive master file stored on the primary drive in the canonical folder structure. | **None** (Protected; never deleted). |
 | `ReplicaKeep` | Verified mirror copy on a configured replica drive in its master path. | **None** (Retained as backup). |
-| `MarkForRemoval` | Redundant duplicate on a secondary drive or outside the master folder. | Run `metadata-extractor dedup prune --drive <ID> -c drives.yaml` to delete. |
-| `NeedsIngestToMaster` | Unique asset present only on a secondary/external drive and missing from the master drive. | Run `metadata-extractor ingest --source-drive <PATH_OR_ID> -c drives.yaml` to copy and verify. |
+| `MarkForRemoval` | Redundant duplicate on a secondary drive or outside the master folder. | Run `metadata-extractor dedup prune -c drives.yaml --execute` to delete (or `--drive <ID>` for a single drive). |
+| `NeedsIngestToMaster` | Unique asset present only on a secondary/external drive and missing from the master drive. | Run `metadata-extractor ingest -c drives.yaml` to copy and verify (or `--source-drive <PATH_OR_ID>` for a single source). |
 | `ConflictReview` | Multiple differing files found in the canonical master destination requiring review. | Manual inspection. |
 | `Removed` | File was physically unlinked from disk by `dedup prune --execute` or `ingest --delete-source`. | Disk space reclaimed. |
 
@@ -489,22 +492,30 @@ metadata-extractor dedup --all --config drives.yaml
 
 ### `dedup prune`
 
-Safely remove files marked as `MarkForRemoval` from a specific mounted drive, verifying that the canonical master replica is safe:
+Safely remove redundant duplicate files marked as `MarkForRemoval`, verifying that each canonical master file is present and intact before any file deletion occurs. Empty ancestor directories are cleanly cleaned up, and database records are purged upon deletion.
+
+> 💡 **Drive-Less Pruning**: The `--drive` argument is **optional**. If omitted, `dedup prune` evaluates and prunes redundant duplicate candidates across **all cataloged drives** in the MongoDB database.
 
 ```bash
-# 1. Preview files that will be deleted from a secondary drive (Safe Dry Run):
-metadata-extractor dedup prune --drive wd_14tb_backup --config drives.yaml
+# 1. Preview duplicates marked for removal across ALL cataloged drives in MongoDB (Safe Dry Run):
+metadata-extractor dedup prune --config drives.yaml
 
-# 2. Execute deletion, requiring canonical master drive to be mounted on disk:
-metadata-extractor dedup prune --drive wd_14tb_backup --config drives.yaml --execute --require-master-disk
+# 2. Execute deletion across all drives, reclaiming storage, removing empty directories, and purging DB records:
+metadata-extractor dedup prune --config drives.yaml --execute
 
-# 3. Execute deletion and export an audit manifest of unlinked files:
-metadata-extractor dedup prune --drive wd_14tb_backup --config drives.yaml --execute -o removal_manifest.json
+# 3. Execute deletion with physical master drive verification:
+metadata-extractor dedup prune --config drives.yaml --execute --require-master-disk
+
+# 4. (Optional) Prune a specific mounted drive only:
+metadata-extractor dedup prune --drive wd_14tb_backup --config drives.yaml --execute
+
+# 5. Export an audit manifest of unlinked files to JSON:
+metadata-extractor dedup prune --config drives.yaml --execute -o removal_manifest.json
 ```
 
 | Option | Flag | Default | Description |
 |---|---|---|---|
-| `--drive` | `-d` | **Required** | Drive ID or mount path to prune (e.g. `wd_14tb_backup` or `/Volumes/SP-2`). |
+| `--drive` | `-d` | *(All Drives)* | Drive ID or mount path to prune (optional: if omitted, prunes all marked duplicates across all cataloged drives in the database). |
 | `--config` | `-c` | `drives.yaml` | Path to drive configuration YAML/TOML file. |
 | `--execute` | — | `false` | Actually delete files on disk (defaults to safe dry-run preview if omitted). |
 | `--require-master-disk` | — | `false` | Require canonical master drive to be mounted and verified on disk before deletion. |
@@ -537,28 +548,32 @@ cat media_metadata.ndjson | metadata-extractor dedup-stream --similarity-thresho
 
 Transfer unmastered files marked `NeedsIngestToMaster` from any external drive, local directory path, or secondary drive into the canonical master drive folder hierarchy (`<MasterRoot>/<Year>/<DD-Mon-YYYY>/{Videos,Photos,PhotosRaw}`), with 100% bitwise BLAKE3 verification and automatic collision handling:
 
-> 💡 **Note on `--source-drive`**: The source drive does **not** need to be predetermined or configured anywhere in `drives.yaml`. You can pass any external drive mount path (e.g. `/Volumes/USB_DRIVE`), local directory path (e.g. `~/Downloads/import`, `./incoming`), or configured drive ID/mount path.
+> 💡 **Drive-Less Ingestion**: The `--source-drive` argument is **optional**. If omitted, `ingest` queries MongoDB for all cataloged assets needing ingestion (`dedup.status: NeedsIngestToMaster`) across all drives and ingests them into the primary master structure.
+> When `--source-drive` is provided, it does **not** need to be configured in `drives.yaml`. You can pass any external drive mount path (e.g. `/Volumes/USB_DRIVE`), local directory path (e.g. `~/Downloads/import`, `./incoming`), or configured drive ID.
 
 ```bash
-# 1. Preview ingestion plan (Dry-Run preview, no disk writes or DB changes):
-metadata-extractor ingest --source-drive /Volumes/USB_DRIVE --config drives.yaml --dry-run
+# 1. Ingest ALL unmastered files directly from the database into primary master (no source argument required):
+metadata-extractor ingest --config drives.yaml
 
-# 2. Ingest unmastered files into primary master (marks source records as MarkForRemoval upon verification):
+# 2. Preview ingestion plan (Dry-Run preview, no disk writes or DB changes):
+metadata-extractor ingest --config drives.yaml --dry-run
+
+# 3. Ingest unmastered files AND automatically fan out new canonical masters to all mounted replica drives:
+metadata-extractor ingest --replicate --config drives.yaml
+
+# 4. Ingest from a specific external drive or local directory path:
 metadata-extractor ingest --source-drive /Volumes/USB_DRIVE --config drives.yaml
 
-# 3. Ingest unmastered files from a local directory and delete verified source files:
+# 5. Ingest from a local directory and delete verified source files:
 metadata-extractor ingest --source-drive ./incoming --config drives.yaml --delete-source
 
-# 4. Explicit target drive override:
-metadata-extractor ingest --source-drive /Volumes/USB_DRIVE --target-drive primary_main --config drives.yaml
-
-# 5. Ingest unmastered files AND automatically fan out new canonical masters to all mounted replica drives:
-metadata-extractor ingest --source-drive /Volumes/USB_DRIVE --replicate --config drives.yaml
+# 6. Explicit target drive override:
+metadata-extractor ingest --target-drive primary_main --config drives.yaml
 ```
 
 | Option | Flag | Default | Description |
 |---|---|---|---|
-| `--source-drive` | `-s` | **Required** | Source drive ID, external drive mount path, or local directory path holding unmastered files to ingest (unconfigured external drives and local directory paths supported dynamically). |
+| `--source-drive` | `-s` | *(All DB Candidates)* | Source drive ID, external drive mount path, or local directory path holding unmastered files (optional: if omitted, all unmastered candidates in database are ingested). |
 | `--target-drive` | `-t` | Primary Master | Target master drive ID or mount path (defaults to highest priority master in config). |
 | `--config` | `-c` | `drives.yaml` | Path to drive configuration YAML/TOML file. |
 | `--replicate` | `-r` | `false` | Automatically replicate new canonical masters to all mounted replica drives upon ingestion. |
@@ -602,6 +617,74 @@ metadata-extractor sync-replicas --format json --config drives.yaml
 | `--mongodb-uri` | `--db-uri` | `MONGODB_URI` | MongoDB connection URI override. |
 | `--collection` | `--db-collection` | `MONGODB_COLLECTION` | MongoDB collection name override. |
 | `--quiet` | `-q` | `false` | Suppress non-essential terminal progress telemetry. |
+| `--help` | `-h` | — | Display help information. |
+
+---
+
+### `report` (aliases: `status`, `audit`)
+
+Generate a comprehensive health, lifecycle, and inventory audit report of the entire media catalog directly from MongoDB. The report aggregates total files, file extension breakdowns with percentages, lifecycle categories (ingested, replicated by drive, pending replication, duplicates, marked for deletion, missing EXIF, errors, unmastered), and deterministically recommends the exact next CLI action:
+
+```bash
+# 1. Generate human-readable audit report:
+metadata-extractor report
+
+# 2. Using aliases:
+metadata-extractor status
+metadata-extractor audit
+
+# 3. Output as machine-readable JSON:
+metadata-extractor report --format json
+
+# 4. Inspect sample filepaths for a specific status category (default: top 3 items):
+metadata-extractor report inspect problems
+metadata-extractor report inspect duplicates
+metadata-extractor report inspect marked-for-delete
+metadata-extractor report inspect unreplicated
+metadata-extractor report inspect unmastered
+metadata-extractor report inspect missing-exif
+
+# 5. Direct inspect shortcut with custom sample limit:
+metadata-extractor report -i duplicates -n 5
+```
+
+| Option | Flag | Default | Description |
+|---|---|---|---|
+| `--format` | `-f` | `text` | Output format: `text` (human-readable table) or `json` (machine-readable). |
+| `--inspect` | `-i` | — | Direct shortcut to inspect sample filepaths for a category (`problems`, `missing-exif`, `duplicates`, `unreplicated`, `marked-for-delete`, `unmastered`). |
+| `--limit` | `-n` | `3` | Maximum number of sample filepaths to display when inspecting. |
+| `--config` | `-c` | `drives.yaml` | Path to drive configuration YAML/TOML file. |
+| `--mongodb-uri` | `--db-uri` | `MONGODB_URI` | MongoDB connection URI override. |
+| `--collection` | `--db-collection` | `MONGODB_COLLECTION` | MongoDB collection name override. |
+| `--help` | `-h` | — | Display help information. |
+
+---
+
+### `organize` (aliases: `archive`, `pipeline`)
+
+Execute the unified end-to-end media organization pipeline in a single command, running extraction, database deduplication, master ingestion, replica synchronization, and duplicate pruning sequentially:
+
+```bash
+# 1. Preview complete organization pipeline across all stages (Dry-Run):
+metadata-extractor organize --source /Volumes/USB_STICK --config drives.yaml --dry-run
+
+# 2. Execute end-to-end organize pipeline:
+metadata-extractor organize --source /Volumes/USB_STICK --config drives.yaml
+
+# 3. Organize and replicate, but skip pruning source files:
+metadata-extractor organize --source /Volumes/USB_STICK --config drives.yaml --skip-prune
+```
+
+| Option | Flag | Default | Description |
+|---|---|---|---|
+| `--source` | `-s` | **Required** | Source drive ID, external mount path, or directory containing unorganized media. |
+| `--config` | `-c` | `drives.yaml` | Path to drive configuration YAML/TOML file. |
+| `--dry-run` | — | `false` | Preview planned operations across all stages without copying or deleting files. |
+| `--skip-prune` | — | `false` | Ingest and replicate to backups, but skip pruning source files. |
+| `--no-verify-hash` | — | `false` | Skip secondary BLAKE3 cryptographic hash verification during copy. |
+| `--buffer-size` | — | `8M` | I/O transfer buffer size for stream copies. |
+| `--force` | — | `false` | Force complete re-extraction of all files during metadata scanning. |
+| `--batch-size` | `-b` | `500` | Batch size for discovery and extraction. |
 | `--help` | `-h` | — | Display help information. |
 
 ---
