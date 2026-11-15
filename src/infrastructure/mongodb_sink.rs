@@ -238,6 +238,7 @@ impl MetadataStorageSink for MongoDbStorageSink {
             "file_context.file_path": 1,
             "file_context.file_size_bytes": 1,
             "file_context.modified_at": 1,
+            "extraction_status.status": 1,
         };
 
         let find_options = FindOptions::builder().projection(projection).build();
@@ -309,7 +310,16 @@ impl MetadataStorageSink for MongoDbStorageSink {
                 };
 
                 if let (Some(path), Some(size)) = (file_path, file_size) {
-                    existing_map.insert(path.to_string(), (size, modified_at));
+                    let is_failed = doc
+                        .get_document("extraction_status")
+                        .ok()
+                        .and_then(|st| st.get_str("status").ok())
+                        .map(|s| s == "Failed")
+                        .unwrap_or(false);
+
+                    if !is_failed {
+                        existing_map.insert(path.to_string(), (size, modified_at));
+                    }
                 }
             }
         }

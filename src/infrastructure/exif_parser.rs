@@ -36,6 +36,141 @@ impl ExifMetadataExtractor {
         let exifreader = exif::Reader::new();
         exifreader.read_from_container(&mut bufreader).ok()
     }
+
+    /// Extracts full sensor image dimensions from TIFF SubIFDs for RAW files (such as Nikon NEF).
+    /// Nikon NEFs place thumbnail dimensions (e.g. 160x120) in IFD0, while full sensor dimensions
+    /// (e.g. 6000x4000) are stored in SubIFDs (tag 0x014A).
+    pub fn try_parse_tiff_subifd_dimensions(path: &Path) -> Option<(u32, u32)> {
+        use std::io::{Read, Seek, SeekFrom};
+        let mut file = std::fs::File::open(path).ok()?;
+        let mut header = [0u8; 8];
+        file.read_exact(&mut header).ok()?;
+
+        let is_le = match &header[0..2] {
+            b"II" => true,
+            b"MM" => false,
+            _ => return None,
+        };
+
+        let magic = if is_le {
+            u16::from_le_bytes([header[2], header[3]])
+        } else {
+            u16::from_be_bytes([header[2], header[3]])
+        };
+        if magic != 42 {
+            return None;
+        }
+
+        let ifd0_offset = if is_le {
+            u32::from_le_bytes([header[4], header[5], header[6], header[7]])
+        } else {
+            u32::from_be_bytes([header[4], header[5], header[6], header[7]])
+        };
+
+        let read_u16 = |buf: &[u8]| -> u16 {
+            if is_le {
+                u16::from_le_bytes([buf[0], buf[1]])
+            } else {
+                u16::from_be_bytes([buf[0], buf[1]])
+            }
+        };
+        let read_u32 = |buf: &[u8]| -> u32 {
+            if is_le {
+                u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]])
+            } else {
+                u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]])
+            }
+        };
+
+        // Read IFD0 to discover SubIFDs tag (0x014A)
+        file.seek(SeekFrom::Start(ifd0_offset as u64)).ok()?;
+        let mut num_entries_buf = [0u8; 2];
+        file.read_exact(&mut num_entries_buf).ok()?;
+        let num_entries = read_u16(&num_entries_buf);
+
+        let mut subifd_offsets = Vec::new();
+        for _ in 0..num_entries {
+            let mut entry = [0u8; 12];
+            if file.read_exact(&mut entry).is_err() {
+                break;
+            }
+            let tag = read_u16(&entry[0..2]);
+            let count = read_u32(&entry[4..8]);
+            let val_or_offset = read_u32(&entry[8..12]);
+
+            if tag == 0x014A {
+                if count == 1 {
+                    subifd_offsets.push(val_or_offset);
+                } else if count > 1 {
+                    let cur_pos = file.stream_position().ok()?;
+                    if file.seek(SeekFrom::Start(val_or_offset as u64)).is_ok() {
+                        for _ in 0..count.min(10) {
+                            let mut off_buf = [0u8; 4];
+                            if file.read_exact(&mut off_buf).is_ok() {
+                                subifd_offsets.push(read_u32(&off_buf));
+                            }
+                        }
+                        let _ = file.seek(SeekFrom::Start(cur_pos));
+                    }
+                }
+            }
+        }
+
+        let mut max_pixels = 0u64;
+        let mut best_dims = None;
+
+        // Inspect each SubIFD for ImageWidth (0x0100) and ImageLength (0x0101)
+        for offset in subifd_offsets {
+            if file.seek(SeekFrom::Start(offset as u64)).is_err() {
+                continue;
+            }
+            let mut sub_entries_buf = [0u8; 2];
+            if file.read_exact(&mut sub_entries_buf).is_err() {
+                continue;
+            }
+            let sub_entries = read_u16(&sub_entries_buf);
+
+            let mut w = None;
+            let mut h = None;
+
+            for _ in 0..sub_entries {
+                let mut entry = [0u8; 12];
+                if file.read_exact(&mut entry).is_err() {
+                    break;
+                }
+                let tag = read_u16(&entry[0..2]);
+                let entry_type = read_u16(&entry[2..4]);
+                let val_or_offset = read_u32(&entry[8..12]);
+
+                let val = if entry_type == 3 {
+                    // Short
+                    if is_le {
+                        read_u16(&entry[8..10]) as u32
+                    } else {
+                        read_u16(&entry[8..10]) as u32
+                    }
+                } else {
+                    val_or_offset
+                };
+
+                if tag == 0x0100 {
+                    w = Some(val);
+                } else if tag == 0x0101 {
+                    h = Some(val);
+                }
+            }
+
+            if let (Some(width), Some(height)) = (w, h) {
+                let pixels = (width as u64) * (height as u64);
+                if pixels > max_pixels {
+                    max_pixels = pixels;
+                    best_dims = Some((width, height));
+                }
+            }
+        }
+
+        best_dims
+    }
 }
 
 fn entry_value_to_f64(v: &nom_exif::EntryValue) -> Option<f64> {
@@ -392,6 +527,33 @@ impl MediaMetadataExtractor for ExifMetadataExtractor {
                             orientation,
                         });
                     }
+                }
+            }
+        }
+
+        // For RAW/NEF files or if extracted dimensions are thumbnail-sized (<= 320px) while file > 1MB,
+        // inspect TIFF SubIFDs for full-resolution raw sensor dimensions.
+        let is_raw_format = item.category == crate::domain::models::MediaCategory::RawPhoto
+            || item.extension.eq_ignore_ascii_case("nef");
+        let current_pixels = dimensions
+            .as_ref()
+            .map(|d| (d.width as u64) * (d.height as u64))
+            .unwrap_or(0);
+        let is_small_dim = dimensions
+            .as_ref()
+            .map(|d| d.width <= 320 || d.height <= 320)
+            .unwrap_or(true);
+
+        if (is_raw_format || is_small_dim) && fs_metadata.len() > 1_000_000 {
+            if let Some((sub_w, sub_h)) = Self::try_parse_tiff_subifd_dimensions(path) {
+                let sub_pixels = (sub_w as u64) * (sub_h as u64);
+                if sub_pixels > current_pixels {
+                    let orientation = dimensions.and_then(|d| d.orientation);
+                    dimensions = Some(ImageDimensions {
+                        width: sub_w,
+                        height: sub_h,
+                        orientation,
+                    });
                 }
             }
         }

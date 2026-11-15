@@ -219,3 +219,79 @@ async fn test_mongodb_filter_unmodified_items_live() {
     assert!(extract_paths.contains(&path_new_file));
     assert_eq!(result.extract_bytes, 8_000 + 20_000 + 15_000);
 }
+
+#[tokio::test]
+async fn test_mongodb_filter_reextracts_failed_records() {
+    dotenvy::dotenv().ok();
+    let uri = match std::env::var("MONGODB_URI") {
+        Ok(u) => {
+            let pass = std::env::var("MONGODB_PASSWORD").ok();
+            DatabaseSinkConfig::interpolate_secret(&u, pass.as_deref())
+        }
+        Err(_) => return,
+    };
+    let col_name = format!("test_filter_failed_{}", Uuid::new_v4().simple());
+    let config = DatabaseSinkConfig::new(uri, Some(col_name));
+
+    let sink = match MongoDbStorageSink::connect(config).await {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+
+    let _ = sink.ensure_indexes().await;
+
+    let now_st = SystemTime::now();
+    let now_dt: DateTime<Utc> = now_st.into();
+    let path_failed = PathBuf::from("/media/photo_failed.nef");
+
+    // Insert an existing document with status: Failed
+    let failed_doc = MediaMetadataDocument {
+        id: Uuid::new_v4(),
+        file_context: FileContext {
+            scanned_root: PathBuf::from("/media"),
+            file_path: path_failed.clone(),
+            relative_path: PathBuf::from("photo_failed.nef"),
+            file_name: "photo_failed.nef".to_string(),
+            file_size_bytes: 25_000_000,
+            extension: "nef".to_string(),
+            media_category: MediaCategory::RawPhoto,
+            modified_at: Some(now_dt),
+        },
+        temporal: TemporalMetadata::from_utc_datetime(
+            now_dt,
+            TimestampSource::FileSystemModified,
+        ),
+        camera: None,
+        exposure: None,
+        location: None,
+        dimensions: None,
+        video: None,
+        fingerprint: None,
+        extraction_status: ExtractionStatus {
+            status: metadata_extractor::domain::metadata_models::ExtractionResultKind::Failed,
+            warnings: vec!["Previous extraction failed".to_string()],
+            error_message: Some("File not found on previous attempt".to_string()),
+        },
+        dedup: None,
+    };
+
+    let _ = sink.save_batch(&[failed_doc]).await;
+
+    let discovered_items = vec![DiscoveredMediaItem {
+        path: path_failed.clone(),
+        file_size_bytes: 25_000_000,
+        modified_at: Some(now_st),
+        category: MediaCategory::RawPhoto,
+        extension: "nef".to_string(),
+    }];
+
+    let result = sink
+        .filter_unmodified_items(&discovered_items)
+        .await
+        .expect("filter_unmodified_items failed");
+
+    // Failed record MUST NOT be considered unmodified; it must be marked for re-extraction
+    assert_eq!(result.unmodified_items.len(), 0);
+    assert_eq!(result.items_to_extract.len(), 1);
+    assert_eq!(result.items_to_extract[0].path, path_failed);
+}
