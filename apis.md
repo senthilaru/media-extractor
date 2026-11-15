@@ -21,6 +21,7 @@ For primary setup and the unified command guide, see [README.md](README.md).
    - [ingest](#ingest)
    - [sync-replicas](#sync-replicas-alias-replicate)
    - [report](#report-aliases-status-audit)
+   - [purge](#purge-aliases-purge-source-remove-source-unindex)
    - [organize](#organize-alias-archive-pipeline)
    - [Multi-Drive Configuration Format (drives.yaml)](#multi-drive-configuration-format-drivesyaml)
 5. [Unix Pipelined Streaming Workflows](#5-unix-pipelined-streaming-workflows)
@@ -654,6 +655,34 @@ metadata-extractor report -i duplicates -n 5
 | `--inspect` | `-i` | — | Direct shortcut to inspect sample filepaths for a category (`problems`, `missing-exif`, `duplicates`, `unreplicated`, `marked-for-delete`, `unmastered`). |
 | `--limit` | `-n` | `3` | Maximum number of sample filepaths to display when inspecting. |
 | `--config` | `-c` | `drives.yaml` | Path to drive configuration YAML/TOML file. |
+| `--mongodb-uri` | `--db-uri` | `MONGODB_URI` | MongoDB connection URI override. |
+| `--collection` | `--db-collection` | `MONGODB_COLLECTION` | MongoDB collection name override. |
+| `--help` | `-h` | — | Display help information. |
+
+---
+
+### `purge` (aliases: `purge-source`, `remove-source`, `unindex`)
+
+Purge all media records originating from an unwanted source directory or file path from MongoDB, while generating a dedicated manifest of on-disk file paths on primary master and replica drives for safe manual deletion. Because master and replica archives are strictly protected against programmatic deletion to prevent accidental data loss, master copies are never deleted by code—instead, their paths and sizes are exported into a reviewable manifest along with ready-to-run shell commands.
+
+```bash
+# 1. Preview purge for an unwanted source folder (Dry-Run: previews matched DB records and generates manifest):
+metadata-extractor purge /Users/username/Downloads/unwanted_folder -o manual_delete.txt
+
+# 2. Execute purge: remove matching records from MongoDB and generate manual delete manifest:
+metadata-extractor purge /Users/username/Downloads/unwanted_folder --execute -o manual_delete.txt
+
+# 3. Purge DB records AND delete original local source files from disk (master/replica remain protected):
+metadata-extractor purge /Users/username/Downloads/unwanted_folder --execute --delete-source -o manual_delete.txt
+```
+
+| Option | Flag | Default | Description |
+|---|---|---|---|
+| `<SOURCE_PATH>` | — | *(required)* | Source directory or file path to purge from catalog and database. |
+| `--output` | `-o` | `manual_deletion_paths.txt` | Path to destination manifest file listing all master, replica, and source file paths. |
+| `--execute` | — | `false` | Actually purge matching documents from MongoDB (defaults to dry-run preview if omitted). |
+| `--delete-source` | — | `false` | Also delete physical source files under `<SOURCE_PATH>` from local disk (master/replica remain strictly protected). |
+| `--config` | `-c` | `drives.yaml` | Path to drive configuration YAML file. |
 | `--mongodb-uri` | `--db-uri` | `MONGODB_URI` | MongoDB connection URI override. |
 | `--collection` | `--db-collection` | `MONGODB_COLLECTION` | MongoDB collection name override. |
 | `--help` | `-h` | — | Display help information. |

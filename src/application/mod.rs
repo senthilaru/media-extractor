@@ -8,6 +8,7 @@ pub mod metadata_engine;
 pub mod organize_service;
 pub mod pipeline;
 pub mod progress_tracker;
+pub mod purge_service;
 pub mod replica_service;
 pub mod transfer_service;
 
@@ -21,5 +22,6 @@ pub use organize_service::{
 };
 pub use pipeline::ExtractionPipeline;
 pub use progress_tracker::ProgressTracker;
+pub use purge_service::{PurgeOptions, PurgeReport, PurgeService};
 pub use replica_service::{ReplicaSyncOptions, ReplicaSyncService};
 pub use transfer_service::{InFlightStreamHasher, UnifiedFileTransferService};

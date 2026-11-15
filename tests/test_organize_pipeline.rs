@@ -425,7 +425,7 @@ async fn test_organize_pipeline_protected_source_rejected() {
 
     // Passing primary master path as source
     let options = OrganizePipelineOptions {
-        source_path: primary_dir.join("media/master"),
+        source_path: Some(primary_dir.join("media/master")),
         dry_run: true,
         skip_prune: false,
         no_verify_hash: false,
@@ -458,7 +458,7 @@ async fn test_organize_pipeline_missing_source_rejected() {
     let service = OrganizePipelineService::new();
 
     let options = OrganizePipelineOptions {
-        source_path: temp.path().join("non_existent_folder"),
+        source_path: Some(temp.path().join("non_existent_folder")),
         dry_run: true,
         skip_prune: false,
         no_verify_hash: false,
@@ -512,7 +512,7 @@ async fn test_organize_pipeline_dry_run_and_execution() {
 
     // Step 1: Run Dry Run
     let dry_options = OrganizePipelineOptions {
-        source_path: unorganized_dir.clone(),
+        source_path: Some(unorganized_dir.clone()),
         dry_run: true,
         skip_prune: false,
         no_verify_hash: false,
@@ -538,7 +538,7 @@ async fn test_organize_pipeline_dry_run_and_execution() {
 
     // Step 2: Run Live Execution
     let live_options = OrganizePipelineOptions {
-        source_path: unorganized_dir.clone(),
+        source_path: Some(unorganized_dir.clone()),
         dry_run: false,
         skip_prune: false,
         no_verify_hash: false,
@@ -608,7 +608,7 @@ async fn test_organize_pipeline_skip_prune() {
     let service = OrganizePipelineService::new();
 
     let options = OrganizePipelineOptions {
-        source_path: unorganized_dir.clone(),
+        source_path: Some(unorganized_dir.clone()),
         dry_run: false,
         skip_prune: true,
         no_verify_hash: false,

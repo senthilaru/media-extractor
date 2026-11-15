@@ -20,8 +20,8 @@ use crate::infrastructure::terminal_progress::IndicatifTerminalProgress;
 /// Configuration options for the end-to-end organize pipeline.
 #[derive(Debug, Clone)]
 pub struct OrganizePipelineOptions {
-    /// Path to unorganized source directory or drive to organize
-    pub source_path: PathBuf,
+    /// Optional path to unorganized source directory or drive to organize (if omitted, organizes all pending assets in catalog)
+    pub source_path: Option<PathBuf>,
     /// Whether to run in preview/dry-run mode without modifying disk
     pub dry_run: bool,
     /// Ingest and replicate without pruning source files
@@ -45,7 +45,7 @@ pub struct OrganizePipelineOptions {
 /// Comprehensive execution report for the full organize pipeline.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct OrganizePipelineReport {
-    pub source_path: PathBuf,
+    pub source_path: Option<PathBuf>,
     pub is_dry_run: bool,
     pub files_scanned: usize,
     pub files_extracted: usize,
@@ -82,21 +82,23 @@ impl OrganizePipelineService {
         let total_start = Instant::now();
         let guard = ArchiveProtectionGuard::from_config(config);
 
-        // Fail-fast guard: The source path MUST NEVER be inside a protected master archive
-        if guard.is_protected_path(&options.source_path) {
-            return Err(DeduplicationError::PruneForbiddenOnProtectedArchive {
-                drive: "source".to_string(),
-                path: options.source_path.clone(),
-                reason: "Source directory cannot reside inside protected canonical master archive."
-                    .to_string(),
-            });
-        }
+        // Fail-fast guard: If source path is provided, it MUST NEVER be inside a protected master archive
+        if let Some(ref source) = options.source_path {
+            if guard.is_protected_path(source) {
+                return Err(DeduplicationError::PruneForbiddenOnProtectedArchive {
+                    drive: "source".to_string(),
+                    path: source.clone(),
+                    reason: "Source directory cannot reside inside protected canonical master archive."
+                        .to_string(),
+                });
+            }
 
-        if !options.source_path.exists() {
-            return Err(DeduplicationError::DriveNotMounted {
-                drive: options.source_path.to_string_lossy().to_string(),
-                path: options.source_path.clone(),
-            });
+            if !source.exists() {
+                return Err(DeduplicationError::DriveNotMounted {
+                    drive: source.to_string_lossy().to_string(),
+                    path: source.clone(),
+                });
+            }
         }
 
         let mut stage_durations = Vec::new();
@@ -105,59 +107,73 @@ impl OrganizePipelineService {
         // =========================================================================
         // STAGE 1: Extract Metadata from Source into MongoDB
         // =========================================================================
-        if !options.quiet {
-            eprintln!("\n>>> Stage [1/5]: Extracting Metadata from Source Directory...");
-        }
-        let stage1_start = Instant::now();
-
-        let profile = ExtractionPerformanceProfile {
-            mode: ExtractionMode::Balanced,
-            max_hash_size_bytes: Some(100 * 1024 * 1024),
-            enable_perceptual: true,
-            enable_cryptographic_hash: true,
-            worker_concurrency: std::thread::available_parallelism()
-                .map(|p| p.get())
-                .unwrap_or(8),
-            batch_size: options.batch_size,
-            channel_capacity: options.channel_capacity,
-            update_interval_ms: 250,
-            force_reindex: options.force_reindex,
-        };
-
-        let scan_engine = Arc::new(ScanEngine::new());
-        let metadata_engine = Arc::new(MetadataExtractionEngine::with_performance_profile(
-            profile.clone(),
-        ));
-        let progress_sink: Arc<dyn ProgressSink> =
-            Arc::new(IndicatifTerminalProgress::new(false, options.quiet));
-
-        let pipeline = ExtractionPipeline::new(
-            scan_engine,
-            metadata_engine,
-            profile,
-            Some(sink.clone()),
-            progress_sink,
-        );
-
-        let cancel_token = Arc::new(AtomicBool::new(false));
-        let cancel_for_signal = cancel_token.clone();
-        tokio::spawn(async move {
-            if tokio::signal::ctrl_c().await.is_ok() {
-                cancel_for_signal.store(true, std::sync::atomic::Ordering::Relaxed);
+        let (files_scanned, files_extracted) = if let Some(ref source) = options.source_path {
+            if !options.quiet {
+                eprintln!("\n>>> Stage [1/5]: Extracting Metadata from Source Directory...");
             }
-        });
+            let stage1_start = Instant::now();
 
-        let extract_summary = pipeline
-            .execute(options.source_path.clone(), None, cancel_token, false)
-            .await
-            .map_err(|e| {
-                DeduplicationError::ProcessingFailed(format!("Extraction stage failed: {}", e))
-            })?;
+            let profile = ExtractionPerformanceProfile {
+                mode: ExtractionMode::Balanced,
+                max_hash_size_bytes: Some(100 * 1024 * 1024),
+                enable_perceptual: true,
+                enable_cryptographic_hash: true,
+                worker_concurrency: std::thread::available_parallelism()
+                    .map(|p| p.get())
+                    .unwrap_or(8),
+                batch_size: options.batch_size,
+                channel_capacity: options.channel_capacity,
+                update_interval_ms: 250,
+                force_reindex: options.force_reindex,
+            };
 
-        stage_durations.push((
-            "Extraction".to_string(),
-            stage1_start.elapsed().as_secs_f64(),
-        ));
+            let scan_engine = Arc::new(ScanEngine::new());
+            let metadata_engine = Arc::new(MetadataExtractionEngine::with_performance_profile(
+                profile.clone(),
+            ));
+            let progress_sink: Arc<dyn ProgressSink> =
+                Arc::new(IndicatifTerminalProgress::new(false, options.quiet));
+
+            let pipeline = ExtractionPipeline::new(
+                scan_engine,
+                metadata_engine,
+                profile,
+                Some(sink.clone()),
+                progress_sink,
+            );
+
+            let cancel_token = Arc::new(AtomicBool::new(false));
+            let cancel_for_signal = cancel_token.clone();
+            tokio::spawn(async move {
+                if tokio::signal::ctrl_c().await.is_ok() {
+                    cancel_for_signal.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+            });
+
+            let extract_summary = pipeline
+                .execute(source.clone(), None, cancel_token, false)
+                .await
+                .map_err(|e| {
+                    DeduplicationError::ProcessingFailed(format!("Extraction stage failed: {}", e))
+                })?;
+
+            stage_durations.push((
+                "Extraction".to_string(),
+                stage1_start.elapsed().as_secs_f64(),
+            ));
+            (
+                extract_summary.total_discovered as usize,
+                extract_summary.total_processed as usize,
+            )
+        } else {
+            if !options.quiet {
+                eprintln!(
+                    "\n>>> Stage [1/5]: Extraction skipped (organizing all assets cataloged in MongoDB)..."
+                );
+            }
+            stage_durations.push(("Extraction (Skipped)".to_string(), 0.0));
+            (0, 0)
+        };
 
         // =========================================================================
         // STAGE 2: Universal Deduplication & Replica Audit
@@ -195,7 +211,11 @@ impl OrganizePipelineService {
         let stage3_start = Instant::now();
 
         let ingest_service = MasterIngestService::new();
-        let source_str = options.source_path.to_string_lossy().to_string();
+        let source_str = options
+            .source_path
+            .as_ref()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
         let ingest_options = IngestOptions {
             source_drive: source_str.clone(),
             target_drive: None,
@@ -278,7 +298,10 @@ impl OrganizePipelineService {
 
             let pruner_service = DrivePruningService::new();
             let pruner_options = DrivePrunerOptions {
-                drive_identifier: Some(source_str),
+                drive_identifier: options
+                    .source_path
+                    .as_ref()
+                    .map(|p| p.to_string_lossy().to_string()),
                 execute: !options.dry_run,
                 require_master_disk: true,
                 manifest_out: None,
@@ -306,8 +329,8 @@ impl OrganizePipelineService {
         Ok(OrganizePipelineReport {
             source_path: options.source_path,
             is_dry_run: options.dry_run,
-            files_scanned: extract_summary.total_discovered as usize,
-            files_extracted: extract_summary.total_processed as usize,
+            files_scanned,
+            files_extracted,
             canonical_masters_count: dedup_summary.canonical_masters_count,
             replicas_preserved: dedup_summary.replica_files_preserved,
             files_ingested: ingest_report.files_transferred,

@@ -150,6 +150,46 @@ enum Commands {
     /// Generate a summary report of database content, health metrics, and suggested next actions
     #[command(alias = "status", alias = "audit")]
     Report(ReportArgs),
+
+    /// Purge all catalog and database records originating from an unwanted source directory or file path
+    #[command(alias = "purge", alias = "remove-source", alias = "unindex")]
+    PurgeSource(PurgeSourceArgs),
+}
+
+#[derive(Parser, Debug)]
+struct PurgeSourceArgs {
+    /// Source directory or file path to purge from catalog and database (e.g. /Users/spsenthil/Downloads/czkawka-master)
+    #[arg(value_name = "SOURCE_PATH")]
+    source_path: PathBuf,
+
+    /// Destination file to list on-disk master and replica paths for manual deletion
+    #[arg(short = 'o', long, default_value = "manual_deletion_paths.txt")]
+    output: PathBuf,
+
+    /// Actually purge matched records from MongoDB (defaults to dry-run preview if omitted)
+    #[arg(long, default_value_t = false)]
+    execute: bool,
+
+    /// Also delete original local source files from disk if they still exist
+    #[arg(long, default_value_t = false)]
+    delete_source: bool,
+
+    /// Path to drive configuration YAML file
+    #[arg(
+        short = 'c',
+        long,
+        default_value = "drives.yaml",
+        env = "MEDIA_DRIVES_CONFIG"
+    )]
+    config: PathBuf,
+
+    /// MongoDB connection URI override
+    #[arg(long, visible_alias = "db-uri", env = "MONGODB_URI")]
+    mongodb_uri: Option<String>,
+
+    /// Target MongoDB collection name override
+    #[arg(long, visible_alias = "db-collection", env = "MONGODB_COLLECTION")]
+    collection: Option<String>,
 }
 
 #[derive(Parser, Debug)]
@@ -207,9 +247,9 @@ struct ReportInspectArgs {
 
 #[derive(Parser, Debug)]
 struct OrganizeArgs {
-    /// Source drive ID, external mount path, or directory containing unorganized media
-    #[arg(short = 's', long, required = true)]
-    source: PathBuf,
+    /// Source drive ID, external mount path, or directory containing unorganized media (optional: if omitted, organizes all pending assets in catalog)
+    #[arg(short = 's', long)]
+    source: Option<PathBuf>,
 
     /// Path to drive configuration YAML file
     #[arg(
@@ -683,6 +723,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Commands::SyncReplicas(args) => run_sync_replicas(args).await?,
             Commands::Organize(args) => run_organize_cli(args).await?,
             Commands::Report(args) => run_report_cli(args).await?,
+            Commands::PurgeSource(args) => run_purge_source(args).await?,
         }
     } else if let Some(path) = cli.path {
         let args = ExtractArgs {
@@ -2104,7 +2145,11 @@ async fn run_organize_cli(args: OrganizeArgs) -> Result<(), Box<dyn std::error::
         );
         println!(
             "Source Directory:          {}",
-            report.source_path.display()
+            report
+                .source_path
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "All Cataloged Drives (Database-Driven)".to_string())
         );
         println!(
             "Configuration:             {} ({} groups, {} drives)",
@@ -2322,4 +2367,62 @@ fn render_text_audit_report(report: &CatalogAuditReport) {
         println!("SUGGESTED NEXT ACTION: Catalog is in healthy state.");
     }
     println!("================================================================================");
+}
+
+async fn run_purge_source(args: PurgeSourceArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let drive_config = DrivesConfigLoader::load_from_env_or_path(Some(&args.config))?;
+    let db_config = resolve_db_config(args.mongodb_uri, args.collection);
+
+    let sink = match MongoDbStorageSink::connect(db_config.clone()).await {
+        Ok(s) => std::sync::Arc::new(s),
+        Err(e) => {
+            eprintln!("Database error: {}", e);
+            std::process::exit(3);
+        }
+    };
+
+    let purge_service = metadata_extractor::application::PurgeService::new(sink, drive_config);
+
+    let options = metadata_extractor::application::PurgeOptions {
+        execute: args.execute,
+        delete_source: args.delete_source,
+        manifest_output_path: args.output.clone(),
+    };
+
+    let report = purge_service.purge_source(&args.source_path, &options).await?;
+
+    println!("================================================================================");
+    println!("SOURCE PURGE SUMMARY");
+    println!("================================================================================");
+    println!("Target Source Path       : {}", report.source_prefix);
+    println!("Matched Database Records : {}", report.total_matched_records);
+    if report.is_dry_run {
+        println!("Database Purge Mode      : DRY-RUN PREVIEW (0 records deleted)");
+    } else {
+        println!(
+            "Database Records Purged  : {} (permanently removed from MongoDB)",
+            report.records_purged_from_db
+        );
+    }
+    println!();
+    println!("On-Disk Archive Files Affected (Manual Deletion Required):");
+    println!("  Primary Master Files   : {}", report.primary_master_files.len());
+    println!("  Replica Files          : {}", report.replica_files.len());
+    println!("  Local Source Files     : {}", report.source_files.len());
+    if args.delete_source {
+        println!("  Source Files Deleted   : {}", report.source_files_deleted);
+    }
+    println!();
+    println!("Manual Deletion Manifest : {}", report.manifest_file_path.display());
+    println!("--------------------------------------------------------------------------------");
+    if report.is_dry_run {
+        println!("NOTE: This was a dry-run preview. To execute database cleanup:");
+        println!("  cargo run -- purge \"{}\" --execute", report.source_prefix);
+    } else {
+        println!("To review and delete master archive files manually, consult:");
+        println!("  cat {}", report.manifest_file_path.display());
+    }
+    println!("================================================================================");
+
+    Ok(())
 }

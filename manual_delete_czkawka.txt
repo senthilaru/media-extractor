@@ -1,0 +1,77 @@
+# ==============================================================================
+# MANUAL MEDIA PURGE MANIFEST
+# ==============================================================================
+# Source Path Prefix   : /Users/spsenthil/Downloads/czkawka-master
+# Generated At (UTC)   : 2026-11-14T19:34:57.045007+00:00
+# Matched Catalog Docs : 18
+# Database Status      : PURGED FROM MONGODB
+#
+# CRITICAL SAFETY NOTICE:
+# Master and replica archives are strictly protected against automated programmatic
+# deletion to prevent irreversible loss. Below are the on-disk file paths found
+# across your primary master and replica drives. Review them carefully and delete
+# them manually using the provided shell commands if desired.
+# ==============================================================================
+
+### PRIMARY MASTER FILES (15)
+/Volumes/SP-1/SPSA/media/master/2026/06-Nov-2026/Photos/cedinia_logo_horizontal.png (128.6 KB) [EXISTS]
+/Volumes/SP-1/SPSA/media/master/2026/06-Nov-2026/Photos/ic_launcher.png (11.0 KB) [EXISTS]
+/Volumes/SP-1/SPSA/media/master/2026/06-Nov-2026/Photos/ic_launcher_1.png (18.1 KB) [EXISTS]
+/Volumes/SP-1/SPSA/media/master/2026/06-Nov-2026/Photos/ic_launcher_fg_src.png (61.3 KB) [EXISTS]
+/Volumes/SP-1/SPSA/media/master/2026/06-Nov-2026/Photos/icon_about.png (4.4 KB) [EXISTS]
+/Volumes/SP-1/SPSA/media/master/2026/06-Nov-2026/Photos/krokiet_logo.png (106.1 KB) [EXISTS]
+/Volumes/SP-1/SPSA/media/master/2026/06-Nov-2026/Photos/krokiet_logo_flag.png (106.5 KB) [EXISTS]
+/Volumes/SP-1/SPSA/media/master/2026/06-Nov-2026/Photos/krokiet_logo_flag_name_vertical.png (137.5 KB) [EXISTS]
+/Volumes/SP-1/SPSA/media/master/2026/06-Nov-2026/Photos/krokiet_logo_name_horizontal.png (108.8 KB) [EXISTS]
+/Volumes/SP-1/SPSA/media/master/2026/06-Nov-2026/Photos/large_red.avif (347 B) [EXISTS]
+/Volumes/SP-1/SPSA/media/master/2026/06-Nov-2026/Photos/normal.jpg (1.1 KB) [EXISTS]
+/Volumes/SP-1/SPSA/media/master/2026/06-Nov-2026/Photos/normal2.jpg (1.7 KB) [EXISTS]
+/Volumes/SP-1/SPSA/media/master/2026/06-Nov-2026/Photos/rotated.jpg (4.1 KB) [EXISTS]
+/Volumes/SP-1/SPSA/media/master/2026/06-Nov-2026/Photos/small_blue.avif (332 B) [EXISTS]
+/Volumes/SP-1/SPSA/media/master/2026/06-Nov-2026/Photos/small_red.avif (331 B) [EXISTS]
+
+### REPLICA FILES (0)
+# None found on replica drives.
+
+### SOURCE FILES (18)
+/Users/spsenthil/Downloads/czkawka-master/cedinia/icons/cedinia_logo_horizontal.png (0 B) [DOES NOT EXIST]
+/Users/spsenthil/Downloads/czkawka-master/cedinia/res/drawable-nodpi/ic_launcher_fg_src.png (0 B) [DOES NOT EXIST]
+/Users/spsenthil/Downloads/czkawka-master/cedinia/res/mipmap-hdpi/ic_launcher.png (7.4 KB) [EXISTS]
+/Users/spsenthil/Downloads/czkawka-master/cedinia/res/mipmap-mdpi/ic_launcher.png (4.0 KB) [EXISTS]
+/Users/spsenthil/Downloads/czkawka-master/cedinia/res/mipmap-xhdpi/ic_launcher.png (0 B) [DOES NOT EXIST]
+/Users/spsenthil/Downloads/czkawka-master/cedinia/res/mipmap-xxhdpi/ic_launcher.png (0 B) [DOES NOT EXIST]
+/Users/spsenthil/Downloads/czkawka-master/cedinia/res/mipmap-xxxhdpi/ic_launcher.png (25.4 KB) [EXISTS]
+/Users/spsenthil/Downloads/czkawka-master/czkawka_core/test_resources/heif_images/large_red.avif (0 B) [DOES NOT EXIST]
+/Users/spsenthil/Downloads/czkawka-master/czkawka_core/test_resources/heif_images/small_blue.avif (0 B) [DOES NOT EXIST]
+/Users/spsenthil/Downloads/czkawka-master/czkawka_core/test_resources/heif_images/small_red.avif (0 B) [DOES NOT EXIST]
+/Users/spsenthil/Downloads/czkawka-master/czkawka_core/test_resources/images/normal.jpg (0 B) [DOES NOT EXIST]
+/Users/spsenthil/Downloads/czkawka-master/czkawka_core/test_resources/images/normal2.jpg (0 B) [DOES NOT EXIST]
+/Users/spsenthil/Downloads/czkawka-master/czkawka_core/test_resources/images/rotated.jpg (0 B) [DOES NOT EXIST]
+/Users/spsenthil/Downloads/czkawka-master/czkawka_gui/icons/icon_about.png (0 B) [DOES NOT EXIST]
+/Users/spsenthil/Downloads/czkawka-master/krokiet/icons/krokiet_logo.png (0 B) [DOES NOT EXIST]
+/Users/spsenthil/Downloads/czkawka-master/krokiet/icons/krokiet_logo_flag.png (0 B) [DOES NOT EXIST]
+/Users/spsenthil/Downloads/czkawka-master/krokiet/icons/krokiet_logo_flag_name_vertical.png (0 B) [DOES NOT EXIST]
+/Users/spsenthil/Downloads/czkawka-master/krokiet/icons/krokiet_logo_name_horizontal.png (0 B) [DOES NOT EXIST]
+
+# ==============================================================================
+# SHELL COMMANDS FOR MANUAL REMOVAL
+# ==============================================================================
+# To delete the primary master and replica files manually from disk, copy and run:
+
+rm -f \
+  '/Volumes/SP-1/SPSA/media/master/2026/06-Nov-2026/Photos/cedinia_logo_horizontal.png' \
+  '/Volumes/SP-1/SPSA/media/master/2026/06-Nov-2026/Photos/ic_launcher.png' \
+  '/Volumes/SP-1/SPSA/media/master/2026/06-Nov-2026/Photos/ic_launcher_1.png' \
+  '/Volumes/SP-1/SPSA/media/master/2026/06-Nov-2026/Photos/ic_launcher_fg_src.png' \
+  '/Volumes/SP-1/SPSA/media/master/2026/06-Nov-2026/Photos/icon_about.png' \
+  '/Volumes/SP-1/SPSA/media/master/2026/06-Nov-2026/Photos/krokiet_logo.png' \
+  '/Volumes/SP-1/SPSA/media/master/2026/06-Nov-2026/Photos/krokiet_logo_flag.png' \
+  '/Volumes/SP-1/SPSA/media/master/2026/06-Nov-2026/Photos/krokiet_logo_flag_name_vertical.png' \
+  '/Volumes/SP-1/SPSA/media/master/2026/06-Nov-2026/Photos/krokiet_logo_name_horizontal.png' \
+  '/Volumes/SP-1/SPSA/media/master/2026/06-Nov-2026/Photos/large_red.avif' \
+  '/Volumes/SP-1/SPSA/media/master/2026/06-Nov-2026/Photos/normal.jpg' \
+  '/Volumes/SP-1/SPSA/media/master/2026/06-Nov-2026/Photos/normal2.jpg' \
+  '/Volumes/SP-1/SPSA/media/master/2026/06-Nov-2026/Photos/rotated.jpg' \
+  '/Volumes/SP-1/SPSA/media/master/2026/06-Nov-2026/Photos/small_blue.avif' \
+  '/Volumes/SP-1/SPSA/media/master/2026/06-Nov-2026/Photos/small_red.avif'
+

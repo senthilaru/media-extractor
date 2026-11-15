@@ -1266,6 +1266,74 @@ impl MetadataStorageSink for MongoDbStorageSink {
 
         Ok(samples)
     }
+
+    async fn query_by_source_path_prefix(
+        &self,
+        source_prefix: &str,
+    ) -> Result<Vec<MediaMetadataDocument>, StorageError> {
+        let escaped = regex_escape(source_prefix);
+        let pattern = format!("^{}", escaped);
+        let filter = doc! {
+            "$or": [
+                { "file_context.file_path": { "$regex": &pattern } },
+                { "fingerprint.file_path": { "$regex": &pattern } },
+                { "file_context.original_source_path": { "$regex": &pattern } },
+                { "file_context.scanned_root": { "$regex": &pattern } },
+            ]
+        };
+
+        let mut cursor = self
+            .collection
+            .find(filter)
+            .await
+            .map_err(|e| StorageError::QueryFailed {
+                collection: self.config.collection_name.clone(),
+                message: format!(
+                    "Failed querying documents by source prefix '{}': {}",
+                    source_prefix, e
+                ),
+            })?;
+
+        let mut results = Vec::new();
+        while let Some(raw_doc) = cursor
+            .try_next()
+            .await
+            .map_err(|e| StorageError::QueryFailed {
+                collection: self.config.collection_name.clone(),
+                message: format!("Cursor error querying documents by source prefix: {}", e),
+            })?
+        {
+            if let Ok(doc) = bson_document_to_doc(raw_doc) {
+                results.push(doc);
+            }
+        }
+
+        Ok(results)
+    }
+
+    async fn purge_documents_by_ids(
+        &self,
+        doc_ids: &[uuid::Uuid],
+    ) -> Result<usize, StorageError> {
+        if doc_ids.is_empty() {
+            return Ok(0);
+        }
+        let ids: Vec<String> = doc_ids.iter().map(|id| id.to_string()).collect();
+        let filter = doc! {
+            "id": { "$in": ids }
+        };
+
+        let res = self
+            .collection
+            .delete_many(filter)
+            .await
+            .map_err(|e| StorageError::QueryFailed {
+                collection: self.config.collection_name.clone(),
+                message: format!("Failed batch purging {} documents: {}", doc_ids.len(), e),
+            })?;
+
+        Ok(res.deleted_count as usize)
+    }
 }
 
 /// Converts a `serde_json::Value` to `mongodb::bson::Bson`, safely reinterpreting

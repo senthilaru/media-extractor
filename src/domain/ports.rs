@@ -287,6 +287,22 @@ pub trait MetadataStorageSink: Send + Sync {
     ) -> Result<Vec<crate::domain::audit_models::InspectionSample>, StorageError> {
         Ok(Vec::new())
     }
+
+    /// Queries documents that originated from or match the given source path prefix.
+    async fn query_by_source_path_prefix(
+        &self,
+        _source_prefix: &str,
+    ) -> Result<Vec<MediaMetadataDocument>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    /// Unconditionally deletes documents matching the specified UUIDs (administrative purge).
+    async fn purge_documents_by_ids(
+        &self,
+        _doc_ids: &[uuid::Uuid],
+    ) -> Result<usize, StorageError> {
+        Ok(0)
+    }
 }
 
 /// Port for reporting live progress updates and phase transitions.

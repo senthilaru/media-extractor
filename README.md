@@ -87,6 +87,20 @@ Re-connect Drives 1-by-1 <────────── Reclaim Terabytes of Di
      ./target/release/metadata-extractor report inspect missing-exif
      ```
 
+5. **Step 5: Purge Unwanted Source Folders from Catalog & Drives (`purge` / `purge-source`)**
+   - If unwanted folders (e.g. downloads, test repos) were scanned or ingested by mistake, purge all matching records from MongoDB and generate a manual deletion manifest for master/replica copies:
+     ```bash
+     # Preview purge (Dry-Run: previews matched records and writes manual deletion manifest):
+     ./target/release/metadata-extractor purge /path/to/unwanted_folder -o manual_delete.txt
+
+     # Execute purge: permanently remove records from MongoDB and generate manual deletion manifest:
+     ./target/release/metadata-extractor purge /path/to/unwanted_folder --execute -o manual_delete.txt
+
+     # Purge from MongoDB AND delete original local source files from disk (master/replica remain strictly protected):
+     ./target/release/metadata-extractor purge /path/to/unwanted_folder --execute --delete-source -o manual_delete.txt
+     ```
+   - Master and replica archive files are **strictly protected against programmatic deletion** to prevent accidental loss. Review the generated `manual_delete.txt` manifest and delete the on-disk master files manually when ready.
+
 > 💡 **Looking for API schemas, duplicate detection algorithms, subcommands, or MongoDB query recipes?**  
 > See [apis.md](apis.md) for the complete API and architecture reference.
 
