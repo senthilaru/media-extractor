@@ -1311,6 +1311,48 @@ impl MetadataStorageSink for MongoDbStorageSink {
         Ok(results)
     }
 
+    async fn query_replicas_for_masters(
+        &self,
+        master_paths: &[std::path::PathBuf],
+    ) -> Result<Vec<MediaMetadataDocument>, StorageError> {
+        if master_paths.is_empty() {
+            return Ok(Vec::new());
+        }
+        let paths_bson: Vec<mongodb::bson::Bson> = master_paths
+            .iter()
+            .map(|p| mongodb::bson::Bson::String(p.to_string_lossy().to_string()))
+            .collect();
+
+        let filter = doc! {
+            "dedup.canonical_master_path": { "$in": paths_bson }
+        };
+
+        let mut cursor = self
+            .collection
+            .find(filter)
+            .await
+            .map_err(|e| StorageError::QueryFailed {
+                collection: self.config.collection_name.clone(),
+                message: format!("Failed querying replica documents for masters: {}", e),
+            })?;
+
+        let mut results = Vec::new();
+        while let Some(raw_doc) = cursor
+            .try_next()
+            .await
+            .map_err(|e| StorageError::QueryFailed {
+                collection: self.config.collection_name.clone(),
+                message: format!("Cursor error querying replica documents: {}", e),
+            })?
+        {
+            if let Ok(doc) = bson_document_to_doc(raw_doc) {
+                results.push(doc);
+            }
+        }
+
+        Ok(results)
+    }
+
     async fn purge_documents_by_ids(
         &self,
         doc_ids: &[uuid::Uuid],

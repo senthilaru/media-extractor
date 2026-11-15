@@ -107,8 +107,6 @@ impl PurgeService {
             .await
             .map_err(DeduplicationError::Storage)?;
 
-        let total_matched = docs.len();
-
         // 2. Identify drive boundaries
         let primary_master_root = self
             .config
@@ -175,8 +173,21 @@ impl PurgeService {
         }
 
         let primary_master_vec: Vec<PathBuf> = master_paths.into_iter().collect();
+
+        // Also query any replica documents that reference the identified canonical master paths
+        let mut all_docs = docs;
+        if !primary_master_vec.is_empty() {
+            if let Ok(rep_docs) = self.sink.query_replicas_for_masters(&primary_master_vec).await {
+                for r_doc in rep_docs {
+                    replica_paths.insert(r_doc.file_context.file_path.clone());
+                    all_docs.push(r_doc);
+                }
+            }
+        }
+
         let replica_vec: Vec<PathBuf> = replica_paths.into_iter().collect();
         let source_vec: Vec<PathBuf> = source_paths.into_iter().collect();
+        let total_matched = all_docs.len();
 
         // 3. Generate the manual deletion manifest file
         let manifest_data = PurgeManifestData {
@@ -209,8 +220,8 @@ impl PurgeService {
 
         // 5. Purge documents from MongoDB if execute is true
         let mut records_purged = 0usize;
-        if options.execute && !docs.is_empty() {
-            let doc_ids: Vec<uuid::Uuid> = docs.iter().map(|d| d.id).collect();
+        if options.execute && !all_docs.is_empty() {
+            let doc_ids: Vec<uuid::Uuid> = all_docs.iter().map(|d| d.id).collect();
             records_purged = self
                 .sink
                 .purge_documents_by_ids(&doc_ids)

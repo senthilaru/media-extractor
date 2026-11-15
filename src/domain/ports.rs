@@ -296,6 +296,14 @@ pub trait MetadataStorageSink: Send + Sync {
         Ok(Vec::new())
     }
 
+    /// Queries replica documents referencing the specified canonical master paths.
+    async fn query_replicas_for_masters(
+        &self,
+        _master_paths: &[std::path::PathBuf],
+    ) -> Result<Vec<MediaMetadataDocument>, StorageError> {
+        Ok(Vec::new())
+    }
+
     /// Unconditionally deletes documents matching the specified UUIDs (administrative purge).
     async fn purge_documents_by_ids(
         &self,

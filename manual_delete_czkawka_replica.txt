@@ -1,0 +1,28 @@
+# ==============================================================================
+# MANUAL DELETION MANIFEST: CZKAWKA REPLICA FILES (SP-2)
+# ==============================================================================
+# The following 15 files were backed up to replica SP-2 before czkawka-master was purged.
+# Because automated deletion from master/replica archives is restricted by the
+# ArchiveProtectionGuard safety circuit breaker, execute the rm command below to delete them.
+#
+# Target Replica: /Volumes/SP-2/SPSA/media/master/2026/06-Nov-2026/Photos
+# ==============================================================================
+
+/Volumes/SP-2/SPSA/media/master/2026/06-Nov-2026/Photos/normal2.jpg
+/Volumes/SP-2/SPSA/media/master/2026/06-Nov-2026/Photos/rotated.jpg
+/Volumes/SP-2/SPSA/media/master/2026/06-Nov-2026/Photos/normal.jpg
+/Volumes/SP-2/SPSA/media/master/2026/06-Nov-2026/Photos/large_red.avif
+/Volumes/SP-2/SPSA/media/master/2026/06-Nov-2026/Photos/small_blue.avif
+/Volumes/SP-2/SPSA/media/master/2026/06-Nov-2026/Photos/small_red.avif
+/Volumes/SP-2/SPSA/media/master/2026/06-Nov-2026/Photos/icon_about.png
+/Volumes/SP-2/SPSA/media/master/2026/06-Nov-2026/Photos/ic_launcher.png
+/Volumes/SP-2/SPSA/media/master/2026/06-Nov-2026/Photos/ic_launcher_fg_src.png
+/Volumes/SP-2/SPSA/media/master/2026/06-Nov-2026/Photos/cedinia_logo_horizontal.png
+/Volumes/SP-2/SPSA/media/master/2026/06-Nov-2026/Photos/krokiet_logo_name_horizontal.png
+/Volumes/SP-2/SPSA/media/master/2026/06-Nov-2026/Photos/krokiet_logo_flag.png
+/Volumes/SP-2/SPSA/media/master/2026/06-Nov-2026/Photos/krokiet_logo_flag_name_vertical.png
+/Volumes/SP-2/SPSA/media/master/2026/06-Nov-2026/Photos/krokiet_logo.png
+/Volumes/SP-2/SPSA/media/master/2026/06-Nov-2026/Photos/ic_launcher_1.png
+
+# Shell command to delete all 15 replica files at once:
+# rm -f /Volumes/SP-2/SPSA/media/master/2026/06-Nov-2026/Photos/{normal2.jpg,rotated.jpg,normal.jpg,large_red.avif,small_blue.avif,small_red.avif,icon_about.png,ic_launcher.png,ic_launcher_fg_src.png,cedinia_logo_horizontal.png,krokiet_logo_name_horizontal.png,krokiet_logo_flag.png,krokiet_logo_flag_name_vertical.png,krokiet_logo.png,ic_launcher_1.png}
