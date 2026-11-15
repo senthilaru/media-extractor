@@ -244,12 +244,30 @@ impl ArchiveProtectionGuard {
         }
     }
 
+    /// Normalizes paths that contain spurious shell backslash escapes (e.g. `\ `)
+    /// which occur when users wrap already-escaped shell paths in quotes.
+    pub fn clean_escaped_path(path: &Path) -> PathBuf {
+        if path.exists() {
+            return path.to_path_buf();
+        }
+        let s = path.to_string_lossy();
+        if s.contains('\\') {
+            let unescaped = PathBuf::from(s.replace("\\ ", " ").replace("\\\\", "\\"));
+            if unescaped.exists() {
+                return unescaped;
+            }
+        }
+        path.to_path_buf()
+    }
+
     /// Safely canonicalizes a path by resolving symlinks and normalizing `.` and `..` segments.
     ///
     /// If the path exists on disk, `std::fs::canonicalize` is used.
     /// If the path does not exist, existing parent directories are canonicalized and
     /// the remaining relative segments are appended, falling back to lexical normalization.
     pub fn canonicalize_safe(path: &Path) -> PathBuf {
+        let cleaned = Self::clean_escaped_path(path);
+        let path = cleaned.as_path();
         if let Ok(canonical) = std::fs::canonicalize(path) {
             return canonical;
         }
@@ -556,5 +574,23 @@ mod tests {
             res
         );
         assert!(!locked_file.exists(), "Locked file should have been deleted");
+    }
+
+    #[test]
+    fn test_clean_escaped_path() {
+        let tmp = tempdir().unwrap();
+        let target_dir = tmp.path().join("Folder With Spaces/Sub Folder");
+        std::fs::create_dir_all(&target_dir).unwrap();
+
+        // Simulate path with literal escaped spaces "\ " as produced when user wraps escaped path in quotes
+        let path_with_escapes = PathBuf::from(format!(
+            "{}/Folder\\ With\\ Spaces/Sub\\ Folder",
+            tmp.path().display()
+        ));
+
+        assert!(!path_with_escapes.exists());
+        let cleaned = ArchiveProtectionGuard::clean_escaped_path(&path_with_escapes);
+        assert!(cleaned.exists());
+        assert_eq!(cleaned, target_dir);
     }
 }

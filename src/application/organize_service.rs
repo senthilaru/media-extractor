@@ -82,8 +82,14 @@ impl OrganizePipelineService {
         let total_start = Instant::now();
         let guard = ArchiveProtectionGuard::from_config(config);
 
+        // Normalize any spurious shell backslash escapes in source_path
+        let cleaned_source = options
+            .source_path
+            .as_ref()
+            .map(|p| ArchiveProtectionGuard::clean_escaped_path(p));
+
         // Fail-fast guard: If source path is provided, it MUST NEVER be inside a protected master archive
-        if let Some(ref source) = options.source_path {
+        if let Some(ref source) = cleaned_source {
             if guard.is_protected_path(source) {
                 return Err(DeduplicationError::PruneForbiddenOnProtectedArchive {
                     drive: "source".to_string(),
@@ -107,7 +113,7 @@ impl OrganizePipelineService {
         // =========================================================================
         // STAGE 1: Extract Metadata from Source into MongoDB
         // =========================================================================
-        let (files_scanned, files_extracted) = if let Some(ref source) = options.source_path {
+        let (files_scanned, files_extracted) = if let Some(ref source) = cleaned_source {
             if !options.quiet {
                 eprintln!("\n>>> Stage [1/5]: Extracting Metadata from Source Directory...");
             }
@@ -327,7 +333,7 @@ impl OrganizePipelineService {
         }
 
         Ok(OrganizePipelineReport {
-            source_path: options.source_path,
+            source_path: cleaned_source,
             is_dry_run: options.dry_run,
             files_scanned,
             files_extracted,

@@ -2117,7 +2117,9 @@ async fn run_organize_cli(args: OrganizeArgs) -> Result<(), Box<dyn std::error::
     let _ = sink.ensure_indexes().await;
 
     let options = OrganizePipelineOptions {
-        source_path: args.source,
+        source_path: args.source.map(|p| {
+            metadata_extractor::infrastructure::archive_guard::ArchiveProtectionGuard::clean_escaped_path(&p)
+        }),
         dry_run: args.dry_run,
         skip_prune: args.skip_prune,
         no_verify_hash: args.no_verify_hash,
