@@ -7,10 +7,11 @@ use uuid::Uuid;
 use crate::domain::dedup_models::{
     CanonicalAsset, DeduplicationConfig, DeduplicationMetadata, DeduplicationStatus,
     DeduplicationSummary, DriveConfiguration, DuplicateCluster, DuplicateRelationship,
-    DuplicateVariant, MediaFingerprint,
+    DuplicateVariant, MediaFingerprint, MediaQualityRank,
 };
 use crate::domain::errors::DeduplicationError;
-use crate::domain::metadata_models::MediaMetadataDocument;
+use crate::domain::metadata_models::{MediaMetadataDocument, TimestampSource};
+
 use crate::domain::models::MediaCategory;
 use crate::domain::ports::{DeduplicationEngine, MetadataStorageSink, MultiIndexLookup};
 use crate::infrastructure::drives_config::CanonicalPathMatcher;
@@ -61,22 +62,56 @@ impl MediaDeduplicationEngine {
     /// Evaluates canonical quality score to deterministically pick the primary master file.
     pub fn score_canonical_candidate(fp: &MediaFingerprint) -> f64 {
         let format_score = match fp.media_category {
-            MediaCategory::RawPhoto => 300.0,
-            MediaCategory::Photo => 200.0,
-            MediaCategory::Video => 100.0,
-            MediaCategory::Sidecar => 50.0,
+            MediaCategory::RawPhoto => 300_000_000.0,
+            MediaCategory::Photo => 200_000_000.0,
+            MediaCategory::Video => 100_000_000.0,
+            MediaCategory::Sidecar => 50_000_000.0,
         };
 
         let resolution_score = if let Some(dims) = fp.dimensions {
-            ((dims.width as f64 * dims.height as f64) / 10000.0).min(200.0)
+            (dims.width as f64 * dims.height as f64) * 10.0
         } else {
             0.0
         };
 
-        let size_score = ((fp.file_size_bytes as f64) / (1024.0 * 1024.0)).min(100.0);
+        let size_score = (fp.file_size_bytes as f64) / 1024.0;
 
         format_score + resolution_score + size_score
     }
+
+    /// Computes the quality rank of a document for deduplication keeper selection.
+    pub fn compute_quality_rank(
+        doc: &MediaMetadataDocument,
+        drive_priority: u32,
+        is_in_master: bool,
+    ) -> MediaQualityRank {
+        let dims = doc.dimensions.or_else(|| {
+            doc.fingerprint.as_ref().and_then(|fp| fp.dimensions)
+        });
+        let total_pixels = dims.map(|d| d.width as u64 * d.height as u64).unwrap_or(0);
+        let file_size_bytes = doc.file_context.file_size_bytes;
+
+        let format_tier = match doc.file_context.media_category {
+            MediaCategory::RawPhoto => 4,
+            MediaCategory::Photo => 3,
+            MediaCategory::Video => 2,
+            MediaCategory::Sidecar => 1,
+        };
+
+        let has_exif_date = doc.temporal.source != TimestampSource::FileSystemModified;
+        let has_gps = doc.location.is_some();
+
+        MediaQualityRank::new(
+            total_pixels,
+            file_size_bytes,
+            format_tier,
+            has_exif_date,
+            has_gps,
+            drive_priority,
+            is_in_master,
+        )
+    }
+
 
     /// Forms a duplicate cluster given a group of identical or similar fingerprints.
     pub fn build_cluster(
@@ -329,7 +364,7 @@ impl MediaDeduplicationEngine {
             drive_id: Option<String>,
             drive_group: Option<String>,
             is_in_master: bool,
-            group_priority: u32,
+            quality_rank: MediaQualityRank,
         }
 
         let contexts: Vec<DocContext> = docs
@@ -346,12 +381,14 @@ impl MediaDeduplicationEngine {
                     None => (None, None, 0),
                 };
 
+                let quality_rank = Self::compute_quality_rank(doc, group_priority, is_in_master);
+
                 DocContext {
                     doc,
                     drive_id,
                     drive_group,
                     is_in_master,
-                    group_priority,
+                    quality_rank,
                 }
             })
             .collect();
@@ -392,14 +429,36 @@ impl MediaDeduplicationEngine {
             let canonical_master_id = canonical_master_ctx.doc.id;
             let canonical_master_path = canonical_master_ctx.doc.file_context.file_path.clone();
 
+            // Check if any unmastered candidate outside master has strictly higher quality
+            // (higher resolution or equal resolution with larger file size)
+            let superior_external = contexts
+                .iter()
+                .filter(|c| c.doc.id != canonical_master_id && !c.is_in_master)
+                .filter(|c| {
+                    c.quality_rank.total_pixels > canonical_master_ctx.quality_rank.total_pixels
+                        || (c.quality_rank.total_pixels == canonical_master_ctx.quality_rank.total_pixels
+                            && c.quality_rank.file_size_bytes > canonical_master_ctx.quality_rank.file_size_bytes)
+                })
+                .max_by_key(|c| c.quality_rank);
+
+            let superior_id = superior_external.map(|s| s.doc.id);
+
             return contexts
                 .iter()
                 .map(|c| {
-                    let status = if c.doc.id == canonical_master_id {
+                    let status = if Some(c.doc.id) == superior_id {
+                        // Higher-resolution candidate discovered outside master -> upgrade master!
+                        DeduplicationStatus::NeedsIngestToMaster
+                    } else if c.doc.id == canonical_master_id {
                         DeduplicationStatus::CanonicalMaster
-                    } else if c.is_in_master {
+                    } else if c.is_in_master
+                        && c.quality_rank
+                            .content_quality_cmp(&canonical_master_ctx.quality_rank)
+                            != std::cmp::Ordering::Less
+                    {
                         DeduplicationStatus::ReplicaKeep
                     } else {
+                        // Lower-resolution, smaller, or redundant duplicate -> mark for deletion
                         DeduplicationStatus::MarkForRemoval
                     };
 
@@ -436,15 +495,12 @@ impl MediaDeduplicationEngine {
 
         // Case B: Zero copies exist in the Primary Master path.
         // We select the single best candidate to be ingested to master:
-        // Rank by:
-        // 1. Group priority descending (e.g. replica drive > staging drive > unknown)
-        // 2. is_in_master (true before false - e.g. replica master path)
-        // 3. Earliest or deterministic doc ID
+        // Rank by MediaQualityRank (total_pixels descending, file_size_bytes descending,
+        // format_tier, metadata, group_priority, is_in_master), then tie-break by deterministic doc ID.
         let mut sorted_contexts: Vec<&DocContext> = contexts.iter().collect();
         sorted_contexts.sort_by(|a, b| {
-            b.group_priority
-                .cmp(&a.group_priority)
-                .then_with(|| b.is_in_master.cmp(&a.is_in_master))
+            b.quality_rank
+                .cmp(&a.quality_rank)
                 .then_with(|| a.doc.id.cmp(&b.doc.id))
         });
 
@@ -456,7 +512,11 @@ impl MediaDeduplicationEngine {
             .map(|c| {
                 let status = if c.doc.id == best_candidate_id {
                     DeduplicationStatus::NeedsIngestToMaster
-                } else if c.is_in_master {
+                } else if c.is_in_master
+                    && c.quality_rank
+                        .content_quality_cmp(&best_candidate_ctx.quality_rank)
+                        != std::cmp::Ordering::Less
+                {
                     DeduplicationStatus::ReplicaKeep
                 } else {
                     DeduplicationStatus::MarkForRemoval

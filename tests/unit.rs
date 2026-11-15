@@ -33,3 +33,7 @@ mod drives_config_tests;
 
 #[path = "unit/transfer_service_tests.rs"]
 mod transfer_service_tests;
+
+#[path = "unit/quality_rank_tests.rs"]
+mod quality_rank_tests;
+

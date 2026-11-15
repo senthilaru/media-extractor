@@ -188,12 +188,16 @@ To mark duplicates across all connected or previously scanned drives:
 
 When executed, the engine:
 1. Groups all documents in MongoDB by exact BLAKE3 `fingerprint.cryptographic_hash`.
-2. Evaluates each file against the configured drive hierarchy:
+2. Evaluates each candidate group using **Resolution-Aware Quality Ranking**:
+   - **Visual Resolution First**: The asset with the highest total pixel area (`width × height`) is chosen as the canonical keeper. Lower-resolution copies (thumbnails, downscaled previews, web exports) are designated for deletion (`MarkForRemoval`).
+   - **File Size Tie-Breaker**: For candidates with identical pixel dimensions, the larger file size (higher bitrate / less aggressive compression) is preserved as keeper.
+   - **Master Upgrade**: If an unmastered candidate outside master has strictly higher resolution or fidelity than an existing copy on the primary master, the superior copy is marked **`NeedsIngestToMaster`** to upgrade the archive.
+3. Evaluates each file against the configured drive hierarchy:
    - If a copy exists in the primary master directory (`<MasterRoot>/<Year>/<DD-Mon-YYYY>/{Videos,Photos,PhotosRaw}`), it is marked **`CanonicalMaster`**.
-   - Valid backup copies on configured replica drives are marked **`ReplicaKeep`**.
+   - Valid backup copies on configured replica drives with matching quality are marked **`ReplicaKeep`**.
    - Redundant duplicate copies on secondary drives or non-canonical folders are marked **`MarkForRemoval`** (and their `reclaimable_bytes` calculated).
    - Unique files existing only on a secondary drive are marked **`NeedsIngestToMaster`**.
-3. Writes a `dedup` object onto each document in MongoDB using high-throughput bulk write operations.
+4. Writes a `dedup` object onto each document in MongoDB using high-throughput bulk write operations.
 
 ---
 

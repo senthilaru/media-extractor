@@ -41,6 +41,7 @@ Re-connect Drives 1-by-1 <────────── Reclaim Terabytes of Di
      ```bash
      ./target/release/metadata-extractor dedup -c drives.yaml
      ```
+   - **Resolution-Aware Quality Selection**: In duplicate or near-duplicate clusters, deduplication automatically prioritizes the highest resolution (`width × height`) and largest file size as the canonical keeper. Lower-resolution copies (thumbnails, downscaled previews, web exports) and heavily compressed versions are marked `MarkForRemoval`. If a superior high-resolution copy is discovered on a staging drive, it is scheduled for master ingest (`NeedsIngestToMaster`) to upgrade the archive.
    - This writes a `dedup` status directly onto each asset record in MongoDB (`CanonicalMaster`, `ReplicaKeep`, `MarkForRemoval`, `NeedsIngestToMaster`).
    - Query marked duplicates instantly in MongoDB (`mongosh`):
      ```javascript

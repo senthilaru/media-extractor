@@ -752,3 +752,75 @@ pub struct SidecarPruneResult {
     /// Any errors encountered
     pub errors: Vec<String>,
 }
+
+/// Media quality evaluation ranking for deduplication keeper selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct MediaQualityRank {
+    /// Total pixels (width * height), or 0 if unextractable / non-visual
+    pub total_pixels: u64,
+    /// Physical file size in bytes
+    pub file_size_bytes: u64,
+    /// Quality tier based on media category (e.g. RawPhoto=4 > Photo=3 > Video=2 > Sidecar=1)
+    pub format_tier: u8,
+    /// True if standard EXIF temporal capture date exists
+    pub has_exif_date: bool,
+    /// True if GPS geolocation coordinates are present
+    pub has_gps: bool,
+    /// Drive group priority (Master=100 > Replica=50 > Staging=10 > Unknown=0)
+    pub drive_priority: u32,
+    /// Whether file is within a canonical master directory structure
+    pub is_in_master: bool,
+}
+
+impl MediaQualityRank {
+    pub fn new(
+        total_pixels: u64,
+        file_size_bytes: u64,
+        format_tier: u8,
+        has_exif_date: bool,
+        has_gps: bool,
+        drive_priority: u32,
+        is_in_master: bool,
+    ) -> Self {
+        Self {
+            total_pixels,
+            file_size_bytes,
+            format_tier,
+            has_exif_date,
+            has_gps,
+            drive_priority,
+            is_in_master,
+        }
+    }
+
+    /// Compares media content fidelity (resolution, size, format, metadata) ignoring storage drive location.
+    pub fn content_quality_cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.total_pixels
+            .cmp(&other.total_pixels)
+            .then_with(|| self.file_size_bytes.cmp(&other.file_size_bytes))
+            .then_with(|| self.format_tier.cmp(&other.format_tier))
+            .then_with(|| self.has_exif_date.cmp(&other.has_exif_date))
+            .then_with(|| self.has_gps.cmp(&other.has_gps))
+    }
+}
+
+
+impl Ord for MediaQualityRank {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.total_pixels
+            .cmp(&other.total_pixels)
+            .then_with(|| self.file_size_bytes.cmp(&other.file_size_bytes))
+            .then_with(|| self.format_tier.cmp(&other.format_tier))
+            .then_with(|| self.has_exif_date.cmp(&other.has_exif_date))
+            .then_with(|| self.has_gps.cmp(&other.has_gps))
+            .then_with(|| self.drive_priority.cmp(&other.drive_priority))
+            .then_with(|| self.is_in_master.cmp(&other.is_in_master))
+    }
+}
+
+impl PartialOrd for MediaQualityRank {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
