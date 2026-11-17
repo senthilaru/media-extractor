@@ -156,6 +156,46 @@ impl UnifiedFileTransferService {
         }
     }
 
+    /// Checks if an extension is a known companion sidecar format.
+    pub fn is_sidecar_extension(ext: &str) -> bool {
+        ext.eq_ignore_ascii_case("aae")
+            || ext.eq_ignore_ascii_case("ifo")
+            || ext.eq_ignore_ascii_case("bup")
+    }
+
+    /// Checks if a media file stem and sidecar stem match, supporting:
+    /// 1. Exact match (`m == s`)
+    /// 2. Apple edit variants (`IMG_1234`, `IMG_E1234`, `IMG_O1234`, `OIMG_1234`)
+    /// 3. DVD Title Set sets (`VTS_xx_y` matches `VTS_xx_0` or `VTS_xx_y`)
+    /// 4. DVD Disc sets (`VIDEO_TS` matches `VIDEO_TS`)
+    pub fn is_companion_sidecar_stem_match(
+        media_stem: &str,
+        sidecar_stem: &str,
+        sidecar_ext: &str,
+    ) -> bool {
+        if media_stem.eq_ignore_ascii_case(sidecar_stem) {
+            return true;
+        }
+
+        if sidecar_ext.eq_ignore_ascii_case("aae") {
+            return Self::is_apple_sidecar_stem_match(media_stem, sidecar_stem);
+        }
+
+        if sidecar_ext.eq_ignore_ascii_case("ifo") || sidecar_ext.eq_ignore_ascii_case("bup") {
+            let m = media_stem.to_ascii_lowercase();
+            let s = sidecar_stem.to_ascii_lowercase();
+            if m.starts_with("vts_") && s.starts_with("vts_") {
+                let parts_m: Vec<&str> = m.split('_').collect();
+                let parts_s: Vec<&str> = s.split('_').collect();
+                if parts_m.len() >= 2 && parts_s.len() >= 2 && parts_m[1] == parts_s[1] {
+                    return true;
+                }
+            }
+        }
+
+        false
+    }
+
     /// Checks if a media file stem and sidecar stem match, supporting all standard Apple edit variants:
     /// `IMG_1234`, `IMG_E1234`, `IMG_O1234`, `OIMG_1234`.
     pub fn is_apple_sidecar_stem_match(media_stem: &str, sidecar_stem: &str) -> bool {
@@ -185,15 +225,23 @@ impl UnifiedFileTransferService {
         !norm_m.is_empty() && norm_m == norm_s
     }
 
-    /// Detects if an Apple `.AAE` sidecar companion exists on disk for a given media file path.
-    /// Supports exact stem matching (`IMG_1234.AAE`, `IMG_1234.aae`, `IMG_1234.Aae`)
-    /// and Apple edit variants (`IMG_E1234`, `IMG_O1234`, `OIMG_1234`).
-    pub fn find_companion_sidecar(media_path: &Path) -> Option<PathBuf> {
-        let parent = media_path.parent()?;
-        let stem = media_path.file_stem()?.to_str()?;
+    /// Detects all companion sidecars (.AAE, .IFO, .BUP) on disk for a given media file path.
+    pub fn find_companion_sidecars(media_path: &Path) -> Vec<PathBuf> {
+        let parent = match media_path.parent() {
+            Some(p) => p,
+            None => return Vec::new(),
+        };
+        let stem = match media_path.file_stem().and_then(|s| s.to_str()) {
+            Some(s) => s,
+            None => return Vec::new(),
+        };
 
-        let entries = std::fs::read_dir(parent).ok()?;
-        let mut candidates = Vec::new();
+        let entries = match std::fs::read_dir(parent) {
+            Ok(e) => e,
+            Err(_) => return Vec::new(),
+        };
+
+        let mut sidecars = Vec::new();
 
         for entry in entries.flatten() {
             let path = entry.path();
@@ -201,26 +249,31 @@ impl UnifiedFileTransferService {
                 continue;
             }
             if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-                if ext.eq_ignore_ascii_case("aae") {
+                if Self::is_sidecar_extension(ext) {
                     if let Some(entry_stem) = path.file_stem().and_then(|s| s.to_str()) {
-                        if Self::is_apple_sidecar_stem_match(stem, entry_stem) {
-                            if entry_stem.eq_ignore_ascii_case(stem) {
-                                return Some(path);
-                            }
-                            candidates.push(path);
+                        if Self::is_companion_sidecar_stem_match(stem, entry_stem, ext) {
+                            sidecars.push(path);
                         }
                     }
                 }
             }
         }
 
-        candidates.into_iter().next()
+        sidecars.sort();
+        sidecars.dedup();
+        sidecars
     }
 
-    /// Finds a companion media file (photo or video) on disk for a given `.AAE` sidecar.
+    /// Detects if a companion sidecar exists on disk for a given media file path.
+    pub fn find_companion_sidecar(media_path: &Path) -> Option<PathBuf> {
+        Self::find_companion_sidecars(media_path).into_iter().next()
+    }
+
+    /// Finds a companion media file (photo or video) on disk for a given sidecar.
     pub fn find_companion_media_file(sidecar_path: &Path) -> Option<PathBuf> {
         let parent = sidecar_path.parent()?;
         let sidecar_stem = sidecar_path.file_stem()?.to_str()?;
+        let sidecar_ext = sidecar_path.extension()?.to_str().unwrap_or_default();
 
         let entries = std::fs::read_dir(parent).ok()?;
         let mut candidates = Vec::new();
@@ -231,9 +284,9 @@ impl UnifiedFileTransferService {
                 continue;
             }
             if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-                if !ext.eq_ignore_ascii_case("aae") {
+                if !Self::is_sidecar_extension(ext) {
                     if let Some(entry_stem) = path.file_stem().and_then(|s| s.to_str()) {
-                        if Self::is_apple_sidecar_stem_match(entry_stem, sidecar_stem) {
+                        if Self::is_companion_sidecar_stem_match(entry_stem, sidecar_stem, sidecar_ext) {
                             if entry_stem.eq_ignore_ascii_case(sidecar_stem) {
                                 return Some(path);
                             }
@@ -247,26 +300,23 @@ impl UnifiedFileTransferService {
         candidates.into_iter().next()
     }
 
-    /// Transfers an optional companion `.AAE` sidecar alongside a primary media asset.
-    /// Places the sidecar in the same target parent directory, with the same base name
-    /// as the (possibly collision-resolved) target media file.
-    pub async fn transfer_companion_sidecar_if_present(
+    /// Transfers all companion sidecars (.aae, .ifo, .bup) alongside a primary media asset.
+    /// Places each sidecar in the same target parent directory.
+    pub async fn transfer_companion_sidecars_if_present(
         source_media_path: &Path,
         target_media_path: &Path,
         config: TransferBufferConfig,
         delete_source: bool,
-    ) -> Result<crate::domain::dedup_models::SidecarTransferResult, DeduplicationError> {
-        let sidecar_src = match Self::find_companion_sidecar(source_media_path) {
-            Some(p) => p,
-            None => {
-                return Ok(crate::domain::dedup_models::SidecarTransferResult::default());
-            }
-        };
+    ) -> Result<Vec<crate::domain::dedup_models::SidecarTransferResult>, DeduplicationError> {
+        let sidecars = Self::find_companion_sidecars(source_media_path);
+        if sidecars.is_empty() {
+            return Ok(Vec::new());
+        }
 
         let target_parent = match target_media_path.parent() {
             Some(p) => p,
             None => {
-                return Ok(crate::domain::dedup_models::SidecarTransferResult::default());
+                return Ok(Vec::new());
             }
         };
 
@@ -275,59 +325,98 @@ impl UnifiedFileTransferService {
             .and_then(|s| s.to_str())
             .unwrap_or("media");
 
-        let sidecar_ext = sidecar_src
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("AAE");
+        let mut results = Vec::new();
 
-        let target_sidecar_path = target_parent.join(format!("{}.{}", target_stem, sidecar_ext));
+        for sidecar_src in sidecars {
+            let sidecar_ext = sidecar_src
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("sidecar");
 
-        let sidecar_size = std::fs::metadata(&sidecar_src)
-            .map(|m| m.len())
-            .unwrap_or(0);
+            let is_dvd = sidecar_ext.eq_ignore_ascii_case("ifo") || sidecar_ext.eq_ignore_ascii_case("bup");
+            let target_file_name = if is_dvd {
+                sidecar_src
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("metadata.ifo")
+                    .to_string()
+            } else {
+                format!("{}.{}", target_stem, sidecar_ext)
+            };
 
-        // If target already exists and has identical length, skip
-        if target_sidecar_path.exists() {
-            let existing_len = std::fs::metadata(&target_sidecar_path)
+            let target_sidecar_path = target_parent.join(target_file_name);
+
+            let sidecar_size = std::fs::metadata(&sidecar_src)
                 .map(|m| m.len())
                 .unwrap_or(0);
-            if existing_len == sidecar_size {
-                if delete_source {
-                    let _ = tokio::fs::remove_file(&sidecar_src).await;
+
+            // If target already exists and has identical length, skip
+            if target_sidecar_path.exists() {
+                let existing_len = std::fs::metadata(&target_sidecar_path)
+                    .map(|m| m.len())
+                    .unwrap_or(0);
+                if existing_len == sidecar_size {
+                    if delete_source {
+                        let _ = tokio::fs::remove_file(&sidecar_src).await;
+                    }
+                    results.push(crate::domain::dedup_models::SidecarTransferResult {
+                        found: true,
+                        source_path: Some(sidecar_src),
+                        target_path: Some(target_sidecar_path),
+                        bytes_transferred: 0,
+                        skipped_identical: true,
+                        error: None,
+                    });
+                    continue;
                 }
-                return Ok(crate::domain::dedup_models::SidecarTransferResult {
-                    found: true,
-                    source_path: Some(sidecar_src),
-                    target_path: Some(target_sidecar_path),
-                    bytes_transferred: 0,
-                    skipped_identical: true,
-                    error: None,
-                });
             }
+
+            // Perform stream copy verified
+            let bytes_copied = Self::stream_copy_verified(
+                &sidecar_src,
+                &target_sidecar_path,
+                sidecar_size,
+                None,
+                config,
+            )
+            .await?;
+
+            if delete_source {
+                let _ = tokio::fs::remove_file(&sidecar_src).await;
+            }
+
+            results.push(crate::domain::dedup_models::SidecarTransferResult {
+                found: true,
+                source_path: Some(sidecar_src),
+                target_path: Some(target_sidecar_path),
+                bytes_transferred: bytes_copied,
+                skipped_identical: false,
+                error: None,
+            });
         }
 
-        // Perform stream copy verified
-        let bytes_copied = Self::stream_copy_verified(
-            &sidecar_src,
-            &target_sidecar_path,
-            sidecar_size,
-            None,
+        Ok(results)
+    }
+
+    /// Transfers an optional companion sidecar alongside a primary media asset.
+    /// Places the sidecar in the same target parent directory.
+    pub async fn transfer_companion_sidecar_if_present(
+        source_media_path: &Path,
+        target_media_path: &Path,
+        config: TransferBufferConfig,
+        delete_source: bool,
+    ) -> Result<crate::domain::dedup_models::SidecarTransferResult, DeduplicationError> {
+        let results = Self::transfer_companion_sidecars_if_present(
+            source_media_path,
+            target_media_path,
             config,
+            delete_source,
         )
         .await?;
-
-        if delete_source {
-            let _ = tokio::fs::remove_file(&sidecar_src).await;
-        }
-
-        Ok(crate::domain::dedup_models::SidecarTransferResult {
-            found: true,
-            source_path: Some(sidecar_src),
-            target_path: Some(target_sidecar_path),
-            bytes_transferred: bytes_copied,
-            skipped_identical: false,
-            error: None,
-        })
+        Ok(results
+            .into_iter()
+            .next()
+            .unwrap_or_default())
     }
 
     /// Builds a relative canonical path: `<Year>/<DD-Mon-YYYY>/{Videos,Photos,PhotosRaw}/<Filename>`
@@ -339,7 +428,17 @@ impl UnifiedFileTransferService {
         filename: &str,
     ) -> PathBuf {
         let (y, date_folder) = Self::format_date_folder(year, month, day);
-        let cat_folder = Self::category_folder_name(category);
+        let ext = Path::new(filename)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or_default();
+        let cat_folder = if category == MediaCategory::Sidecar
+            && (ext.eq_ignore_ascii_case("ifo") || ext.eq_ignore_ascii_case("bup"))
+        {
+            "Videos"
+        } else {
+            Self::category_folder_name(category)
+        };
         PathBuf::from(format!("{}", y))
             .join(date_folder)
             .join(cat_folder)

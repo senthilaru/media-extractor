@@ -259,21 +259,27 @@ impl MasterIngestService {
                 (2026, 1, 1)
             };
 
-            // If this item is a Sidecar (.aae), check if its companion is in current batch, existing masters, or on disk
+            // If this item is a Sidecar (.aae, .ifo, .bup), check if its companion is in current batch, existing masters, or on disk
             let mut resolved_rel_path = None;
             if cat == MediaCategory::Sidecar {
                 let stem = Path::new(&doc.file_context.file_name)
                     .file_stem()
                     .and_then(|s| s.to_str())
                     .unwrap_or_default();
+                let is_dvd = doc.file_context.extension.eq_ignore_ascii_case("ifo")
+                    || doc.file_context.extension.eq_ignore_ascii_case("bup");
 
                 // Check 1: Companion in current plan tasks (being ingested in same batch)
                 for task in &tasks {
                     if let Some(task_stem) = task.source_path.file_stem().and_then(|s| s.to_str()) {
-                        if UnifiedFileTransferService::is_apple_sidecar_stem_match(task_stem, stem) {
+                        if UnifiedFileTransferService::is_companion_sidecar_stem_match(task_stem, stem, &doc.file_context.extension) {
                             if let Some(task_parent) = task.target_path.parent() {
                                 if let Ok(rel_parent) = task_parent.strip_prefix(&target_drive.master_path) {
-                                    let sidecar_name = format!("{}.{}", task_stem, doc.file_context.extension);
+                                    let sidecar_name = if is_dvd {
+                                        doc.file_context.file_name.clone()
+                                    } else {
+                                        format!("{}.{}", task_stem, doc.file_context.extension)
+                                    };
                                     resolved_rel_path = Some(rel_parent.join(sidecar_name));
                                     break;
                                 }
@@ -289,7 +295,7 @@ impl MasterIngestService {
                             .file_stem()
                             .and_then(|s| s.to_str())
                             .unwrap_or_default();
-                        if UnifiedFileTransferService::is_apple_sidecar_stem_match(master_stem, stem) {
+                        if UnifiedFileTransferService::is_companion_sidecar_stem_match(master_stem, stem, &doc.file_context.extension) {
                             let master_path = &master.file_context.file_path;
                             let rel_opt = if let Ok(rel) = master_path.strip_prefix(&target_drive.master_path) {
                                 rel.parent().map(|p| p.to_path_buf())
@@ -303,7 +309,11 @@ impl MasterIngestService {
                             };
 
                             if let Some(rel_parent) = rel_opt {
-                                let sidecar_name = format!("{}.{}", master_stem, doc.file_context.extension);
+                                let sidecar_name = if is_dvd {
+                                    doc.file_context.file_name.clone()
+                                } else {
+                                    format!("{}.{}", master_stem, doc.file_context.extension)
+                                };
                                 resolved_rel_path = Some(rel_parent.join(sidecar_name));
                                 break;
                             }
@@ -318,12 +328,16 @@ impl MasterIngestService {
                     {
                         let comp_cat = crate::infrastructure::classifier::PhfMediaClassifier::new()
                             .classify(&comp_path)
-                            .unwrap_or(MediaCategory::Photo);
+                            .unwrap_or(if is_dvd { MediaCategory::Video } else { MediaCategory::Photo });
                         let comp_stem = comp_path
                             .file_stem()
                             .and_then(|s| s.to_str())
                             .unwrap_or(stem);
-                        let sidecar_name = format!("{}.{}", comp_stem, doc.file_context.extension);
+                        let sidecar_name = if is_dvd {
+                            doc.file_context.file_name.clone()
+                        } else {
+                            format!("{}.{}", comp_stem, doc.file_context.extension)
+                        };
                         let cat_folder = UnifiedFileTransferService::category_folder_name(comp_cat);
                         let (y, date_folder) =
                             UnifiedFileTransferService::format_date_folder(year, month, day);

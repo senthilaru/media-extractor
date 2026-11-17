@@ -165,4 +165,26 @@ fn test_find_companion_sidecar() {
         UnifiedFileTransferService::find_companion_sidecar(&img_lone),
         None
     );
+
+    // DVD Title Set: VTS_01_1.VOB matches both VTS_01_0.IFO and VTS_01_0.BUP
+    let vob1 = dir.path().join("VTS_01_1.VOB");
+    let ifo1 = dir.path().join("VTS_01_0.IFO");
+    let bup1 = dir.path().join("VTS_01_0.BUP");
+    std::fs::write(&vob1, b"vob_data").unwrap();
+    std::fs::write(&ifo1, b"ifo_data").unwrap();
+    std::fs::write(&bup1, b"bup_data").unwrap();
+
+    let sidecars = UnifiedFileTransferService::find_companion_sidecars(&vob1);
+    assert_eq!(sidecars.len(), 2);
+    assert!(sidecars.contains(&ifo1));
+    assert!(sidecars.contains(&bup1));
+
+    // DVD Title Set exact match: VTS_02_1.VOB matches VTS_02_1.IFO
+    let vob2 = dir.path().join("VTS_02_1.vob");
+    let ifo2 = dir.path().join("VTS_02_1.ifo");
+    std::fs::write(&vob2, b"vob2_data").unwrap();
+    std::fs::write(&ifo2, b"ifo2_data").unwrap();
+
+    let sidecars2 = UnifiedFileTransferService::find_companion_sidecars(&vob2);
+    assert_eq!(sidecars2, vec![ifo2]);
 }

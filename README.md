@@ -305,8 +305,9 @@ When `.env` is present, you can simply run:
 ## Supported Media Formats
 
 - **Photos**: JPG, JPEG, PNG, WEBP, GIF, BMP, HEIC, HEIF, AVIF, TIFF, TIF
-- **Videos**: MP4, MOV, MKV, AVI, WEBM, M4V, 3GP, WMV, FLV, MTS, M2TS
+- **Videos**: MP4, MOV, MKV, AVI, WEBM, M4V, 3GP, WMV, FLV, MTS, M2TS, VOB
 - **Camera RAW**: CR2, CR3, NEF, ARW, DNG, ORF, RW2, PEF, RAF, SRW
+- **Companion Sidecars**: AAE (Apple edits), IFO (DVD navigation info), BUP (DVD backup info)
 
 ---
 

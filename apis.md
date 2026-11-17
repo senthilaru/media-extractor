@@ -129,7 +129,7 @@ Every emitted JSON record strictly complies with document database schemas and p
 
 ### Hash Calculation Methodologies
 
-| Hash Parameter | Photos & Camera RAW | Videos (MP4, MOV, MKV) | Calculation Method & Resource Characteristics |
+| Hash Parameter | Photos & Camera RAW | Videos (MP4, MOV, MKV, VOB) | Calculation Method & Resource Characteristics |
 |---|---|---|---|
 | **`fingerprint.cryptographic_hash`** | Computed | Computed | **Streaming BLAKE3 256-bit digest** read in 64 KB chunks until EOF. Low memory overhead (< 100 MB RAM) even on multi-GB video files. 100% collision-resistant bitwise identity. |
 | **`fingerprint.sample_digest`** | Computed | Computed | **BLAKE3 fast sample digest** combining 64-bit file byte length + first 16 KB (MP4 `ftyp`/header) + last 16 KB (MP4 `moov`/trailer). Rapid pre-filter. |

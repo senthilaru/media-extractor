@@ -149,3 +149,30 @@ fn test_extract_tail_moov_video_container() {
     let vid = doc.video.expect("Video metadata should be present");
     assert_eq!(vid.duration_ms, 5000);
 }
+
+#[test]
+fn test_video_extract_vob_container_fallback() {
+    let temp_file = tempfile::Builder::new()
+        .suffix(".VOB")
+        .tempfile()
+        .expect("Failed to create temp file");
+    let temp_path = temp_file.path().to_path_buf();
+
+    let extractor = VideoMetadataExtractor::new();
+    let item = DiscoveredMediaItem {
+        path: temp_path.clone(),
+        file_size_bytes: 1024,
+        modified_at: None,
+        category: MediaCategory::Video,
+        extension: "vob".to_string(),
+    };
+
+    let doc = extractor
+        .extract_file(&item, temp_path.parent())
+        .expect("Extraction for VOB file should succeed");
+
+    assert_eq!(doc.temporal.source, TimestampSource::FileSystemModified);
+    assert_eq!(doc.file_context.media_category, MediaCategory::Video);
+    assert_eq!(doc.file_context.extension, "vob");
+    assert_eq!(doc.extraction_status.status, ExtractionResultKind::Partial);
+}

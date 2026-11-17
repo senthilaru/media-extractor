@@ -607,17 +607,20 @@ impl DrivePruningService {
                             bytes_reclaimed += task.file_size_bytes;
                             affected_file_paths.push(task.target_file_path.clone());
 
-                            // Check if a companion .AAE sidecar exists in the source folder
-                            if let Some(source_sidecar) =
-                                UnifiedFileTransferService::find_companion_sidecar(
-                                    &task.target_file_path,
-                                )
-                            {
-                                let master_has_sidecar =
-                                    UnifiedFileTransferService::find_companion_sidecar(
-                                        &task.canonical_master_path,
-                                    )
-                                    .is_some();
+                            // Check if companion sidecars (.AAE, .IFO, .BUP) exist in the source folder
+                            let master_sidecars = UnifiedFileTransferService::find_companion_sidecars(
+                                &task.canonical_master_path,
+                            );
+                            for source_sidecar in UnifiedFileTransferService::find_companion_sidecars(
+                                &task.target_file_path,
+                            ) {
+                                let source_sidecar_name = source_sidecar.file_name();
+                                let source_sidecar_ext = source_sidecar.extension();
+                                let master_has_sidecar = master_sidecars.iter().any(|m| {
+                                    m.file_name() == source_sidecar_name
+                                        || (m.extension() == source_sidecar_ext
+                                            && m.extension().is_some())
+                                });
                                 if master_has_sidecar {
                                     let sidecar_size = std::fs::metadata(&source_sidecar)
                                         .map(|m| m.len())
@@ -666,9 +669,7 @@ impl DrivePruningService {
                 records_purged += 1;
                 affected_file_paths.push(task.target_file_path.clone());
 
-                if let Some(source_sidecar) =
-                    UnifiedFileTransferService::find_companion_sidecar(&task.target_file_path)
-                {
+                for source_sidecar in UnifiedFileTransferService::find_companion_sidecars(&task.target_file_path) {
                     let sidecar_size = std::fs::metadata(&source_sidecar)
                         .map(|m| m.len())
                         .unwrap_or(0);

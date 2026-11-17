@@ -31,6 +31,7 @@ static EXTENSION_MAP: phf::Map<&'static str, MediaCategory> = phf_map! {
     "flv" => MediaCategory::Video,
     "mts" => MediaCategory::Video,
     "m2ts" => MediaCategory::Video,
+    "vob" => MediaCategory::Video,
 
     // Camera RAW formats
     "cr2" => MediaCategory::RawPhoto,
@@ -44,8 +45,10 @@ static EXTENSION_MAP: phf::Map<&'static str, MediaCategory> = phf_map! {
     "raf" => MediaCategory::RawPhoto,
     "srw" => MediaCategory::RawPhoto,
 
-    // Edit sidecar metadata formats
+    // Edit and DVD companion sidecar metadata formats
     "aae" => MediaCategory::Sidecar,
+    "ifo" => MediaCategory::Sidecar,
+    "bup" => MediaCategory::Sidecar,
 };
 
 /// High-performance media classifier with zero heap allocations on the hot path.

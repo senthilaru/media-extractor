@@ -421,6 +421,7 @@ impl MediaMetadataExtractor for VideoMetadataExtractor {
                     "mov" => Some("prores/h264/hevc".to_string()),
                     "webm" => Some("vp8/vp9/av1".to_string()),
                     "mkv" => Some("matroska".to_string()),
+                    "vob" => Some("mpeg2".to_string()),
                     _ => None,
                 });
 
@@ -429,6 +430,7 @@ impl MediaMetadataExtractor for VideoMetadataExtractor {
                 .or_else(|| match extension.as_str() {
                     "mp4" | "mov" | "m4v" => Some("aac".to_string()),
                     "webm" => Some("opus/vorbis".to_string()),
+                    "vob" => Some("ac3/lpcm/dts".to_string()),
                     _ => None,
                 });
 

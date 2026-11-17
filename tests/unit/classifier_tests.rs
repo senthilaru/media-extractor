@@ -98,6 +98,47 @@ fn test_classify_sidecar_aae() {
 }
 
 #[test]
+fn test_classify_vob_and_dvd_metadata() {
+    let classifier = PhfMediaClassifier::new();
+
+    // VOB Video
+    assert_eq!(
+        classifier.classify(Path::new("VTS_01_1.VOB")),
+        Some(MediaCategory::Video)
+    );
+    assert_eq!(
+        classifier.classify(Path::new("VIDEO_TS/VIDEO_TS.vob")),
+        Some(MediaCategory::Video)
+    );
+    assert!(classifier.is_supported_extension("vob"));
+    assert!(classifier.is_supported_extension("VOB"));
+
+    // IFO Sidecar
+    assert_eq!(
+        classifier.classify(Path::new("VTS_01_0.IFO")),
+        Some(MediaCategory::Sidecar)
+    );
+    assert_eq!(
+        classifier.classify(Path::new("VIDEO_TS.ifo")),
+        Some(MediaCategory::Sidecar)
+    );
+    assert!(classifier.is_supported_extension("ifo"));
+    assert!(classifier.is_supported_extension("IFO"));
+
+    // BUP Sidecar
+    assert_eq!(
+        classifier.classify(Path::new("VTS_01_0.BUP")),
+        Some(MediaCategory::Sidecar)
+    );
+    assert_eq!(
+        classifier.classify(Path::new("VIDEO_TS.bup")),
+        Some(MediaCategory::Sidecar)
+    );
+    assert!(classifier.is_supported_extension("bup"));
+    assert!(classifier.is_supported_extension("BUP"));
+}
+
+#[test]
 fn test_classify_non_media() {
     let classifier = PhfMediaClassifier::new();
 
