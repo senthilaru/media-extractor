@@ -65,11 +65,24 @@ Re-connect Drives 1-by-1 <────────── Reclaim Terabytes of Di
      # (Omit --drive to automatically evaluate and prune duplicate candidates across all configured drives)
      ./target/release/metadata-extractor dedup prune -c drives.yaml
 
-     # Execute deletion across all drives, reclaiming storage and purging obsolete DB records:
+     # Execute deletion across all drives, reclaiming storage, removing empty directories, and purging obsolete DB records:
      ./target/release/metadata-extractor dedup prune -c drives.yaml --execute
+
+     # Sweep and delete orphaned empty directories and 0-byte dummy files on a drive:
+     ./target/release/metadata-extractor dedup prune --drive "/Volumes/Seagate Backup Plus Drive" --clean-empty-dirs --execute
 
      # (Optional) Prune a specific secondary drive only:
      ./target/release/metadata-extractor dedup prune --drive wd_backup -c drives.yaml --execute
+     ```
+
+   - **All-in-One End-to-End Organize Pipeline (`organize`)**:
+     To run scan, duplicate audit, master ingest, replica replication, and pruning in a single unified command:
+     ```bash
+     # Full organize pipeline (safely prunes source media and removes empty folders up to drive ceiling):
+     ./target/release/metadata-extractor organize --source /Volumes/USB_STICK -c drives.yaml
+
+     # Keep the top-level source directory container on disk after pruning:
+     ./target/release/metadata-extractor organize --source /Volumes/USB_STICK/MyPhotos -c drives.yaml --keep-source-dir
      ```
 
 4. **Step 4: Check Catalog Health & Suggested Next Action (`report` / `status` / `audit`)**

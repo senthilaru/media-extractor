@@ -497,7 +497,7 @@ metadata-extractor dedup --all --config drives.yaml
 
 ### `dedup prune`
 
-Safely remove redundant duplicate files marked as `MarkForRemoval`, verifying that each canonical master file is present and intact before any file deletion occurs. Empty ancestor directories are cleanly cleaned up, and database records are purged upon deletion.
+Safely remove redundant duplicate files marked as `MarkForRemoval`, verifying that each canonical master file is present and intact before any file deletion occurs. Empty ancestor directories are cleanly cleaned up (including zero-byte corrupt/dummy files and OS metadata files like `.DS_Store`), and obsolete database records (including 0-byte entries) are purged upon deletion.
 
 > 💡 **Drive-Less Pruning**: The `--drive` argument is **optional**. If omitted, `dedup prune` evaluates and prunes redundant duplicate candidates across **all cataloged drives** in the MongoDB database.
 
@@ -508,13 +508,19 @@ metadata-extractor dedup prune --config drives.yaml
 # 2. Execute deletion across all drives, reclaiming storage, removing empty directories, and purging DB records:
 metadata-extractor dedup prune --config drives.yaml --execute
 
-# 3. Execute deletion with physical master drive verification:
+# 3. Sweep and clean all empty directories and 0-byte dummy files on a drive (Dry Run Preview):
+metadata-extractor dedup prune --drive "/Volumes/Seagate Backup Plus Drive" --clean-empty-dirs
+
+# 4. Sweep and delete all empty directories and 0-byte dummy files on a drive (Live Execution):
+metadata-extractor dedup prune --drive "/Volumes/Seagate Backup Plus Drive" --clean-empty-dirs --execute
+
+# 5. Execute deletion with physical master drive verification:
 metadata-extractor dedup prune --config drives.yaml --execute --require-master-disk
 
-# 4. (Optional) Prune a specific mounted drive only:
+# 6. (Optional) Prune a specific mounted drive only:
 metadata-extractor dedup prune --drive wd_14tb_backup --config drives.yaml --execute
 
-# 5. Export an audit manifest of unlinked files to JSON:
+# 7. Export an audit manifest of unlinked files to JSON:
 metadata-extractor dedup prune --config drives.yaml --execute -o removal_manifest.json
 ```
 
@@ -523,6 +529,7 @@ metadata-extractor dedup prune --config drives.yaml --execute -o removal_manifes
 | `--drive` | `-d` | *(All Drives)* | Drive ID or mount path to prune (optional: if omitted, prunes all marked duplicates across all cataloged drives in the database). |
 | `--config` | `-c` | `drives.yaml` | Path to drive configuration YAML/TOML file. |
 | `--execute` | — | `false` | Actually delete files on disk (defaults to safe dry-run preview if omitted). |
+| `--clean-empty-dirs` | — | `false` | Sweep and remove orphaned empty directories (including directories containing only 0-byte dummy files or `.DS_Store`) up to the drive mount point ceiling. |
 | `--require-master-disk` | — | `false` | Require canonical master drive to be mounted and verified on disk before deletion. |
 | `-o`, `--manifest-out` | — | — | Path to save the removal audit manifest JSON file. |
 | `--mongodb-uri` | `--db-uri` | `MONGODB_URI` | MongoDB connection URI override. |
@@ -695,17 +702,20 @@ metadata-extractor purge /Users/username/Downloads/unwanted_folder --execute --d
 
 ### `organize` (aliases: `archive`, `pipeline`)
 
-Execute the unified end-to-end media organization pipeline in a single command, running extraction, database deduplication, master ingestion, replica synchronization, and duplicate pruning sequentially:
+Execute the unified end-to-end media organization pipeline in a single command, running extraction, database deduplication, master ingestion, replica synchronization, and duplicate pruning sequentially. Upon completion of pruning, vacated source folders and empty parent directories are automatically removed up to the drive mount point ceiling (unless `--keep-source-dir` is specified).
 
 ```bash
 # 1. Preview complete organization pipeline across all stages (Dry-Run):
 metadata-extractor organize --source /Volumes/USB_STICK --config drives.yaml --dry-run
 
-# 2. Execute end-to-end organize pipeline:
+# 2. Execute end-to-end organize pipeline (prunes duplicates & removes empty source folders up to drive ceiling):
 metadata-extractor organize --source /Volumes/USB_STICK --config drives.yaml
 
 # 3. Organize and replicate, but skip pruning source files:
 metadata-extractor organize --source /Volumes/USB_STICK --config drives.yaml --skip-prune
+
+# 4. Prune source files but preserve the top-level source directory container:
+metadata-extractor organize --source /Volumes/USB_STICK/MyPhotos --config drives.yaml --keep-source-dir
 ```
 
 | Option | Flag | Default | Description |
@@ -714,6 +724,7 @@ metadata-extractor organize --source /Volumes/USB_STICK --config drives.yaml --s
 | `--config` | `-c` | `drives.yaml` | Path to drive configuration YAML/TOML file. |
 | `--dry-run` | — | `false` | Preview planned operations across all stages without copying or deleting files. |
 | `--skip-prune` | — | `false` | Ingest and replicate to backups, but skip pruning source files. |
+| `--keep-source-dir` | — | `false` | Preserve the top-level source directory container on disk after pruning (by default, empty source directories and parents up to drive mount ceiling are removed). |
 | `--no-verify-hash` | — | `false` | Skip secondary BLAKE3 cryptographic hash verification during copy. |
 | `--buffer-size` | — | `8M` | I/O transfer buffer size for stream copies. |
 | `--force` | — | `false` | Force complete re-extraction of all files during metadata scanning. |

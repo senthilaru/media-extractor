@@ -65,3 +65,13 @@
 **Purpose**: Verification and code quality
 
 - [x] T010 Run test suite `cargo test`, verify formatting `cargo fmt --check`, and verify lints `cargo clippy`
+
+---
+
+## Phase 7: Empty Source & Ancestor Directory Pruning to Drive Mount Ceiling
+
+**Purpose**: Automatically remove vacated source folders and empty ancestors up to the drive mount ceiling in Stage 5, with `--keep-source-dir` opt-out.
+
+- [x] T011 Add `--keep-source-dir` flag to `OrganizeArgs` and `OrganizePipelineOptions` in `src/main.rs` and `src/application/organize_service.rs`
+- [x] T012 Configure Stage 5 prune to resolve `boundary_ceiling` and clean empty ancestor directories up to the drive mount point
+- [x] T013 Add integration tests in `tests/test_organize_pipeline.rs` verifying empty source & ancestor directory removal up to drive mount ceiling and `--keep-source-dir` behavior

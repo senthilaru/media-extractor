@@ -67,3 +67,27 @@
 **Purpose**: Validation, formatting, and test suite execution
 
 - [X] T012 Run full test suite `cargo test` and verify `cargo fmt --check` and `cargo clippy`
+
+---
+
+## Phase 7: Upward Directory Pruning to Drive Mount Boundary for Organize
+
+**Purpose**: Enable automated directory cleanup in the organize pipeline to remove empty source folders and parents up to drive mount boundary ceiling
+
+- [X] T013 Implement `resolve_drive_boundary_ceiling` and `is_system_or_home_root` in `src/application/drive_pruner.rs`
+- [X] T014 Enhance `clean_empty_ancestor_directories_with_options` supporting `boundary_ceiling` and `preserve_prune_root` in `src/application/drive_pruner.rs`
+- [X] T015 Update `OrganizeService` Stage 5 to pass drive ceiling and prune empty source folder hierarchy by default unless `--keep-source-dir` is passed in `src/application/organize_service.rs`
+- [X] T016 Add integration test in `tests/test_organize_pipeline.rs` verifying cleanup of source folder and parent folders up to drive ceiling
+
+---
+
+## Phase 8: Zero-Byte Dummy File Disposal & Database Purging
+
+**Purpose**: Recognize 0-byte corrupt/dummy files as disposable so ghost directory trees can be unlinked and purged
+
+- [X] T017 Implement `is_disposable_file` recognizing OS files and 0-byte files in `src/application/drive_pruner.rs`
+- [X] T018 Update `check_directory_empty` and dry-run simulation to unlink 0-byte files in `src/application/drive_pruner.rs`
+- [X] T019 Add `purge_zero_byte_records` to `MetadataStorageSink` trait in `src/domain/ports.rs` and implement in `src/infrastructure/mongodb_sink.rs`
+- [X] T020 Add `--clean-empty-dirs` option to `PruneArgs` and `DrivePrunerOptions` for on-demand drive sweeping in `src/main.rs` and `src/application/drive_pruner.rs`
+- [X] T021 Add unit test in `tests/test_drive_pruner.rs` verifying 0-byte file unlinking, empty directory removal, and root preservation
+

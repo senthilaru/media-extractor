@@ -27,9 +27,21 @@
    - The root `/Volumes/SP-1/SPSA/unorganized/Photos` remains present.
    - Any subdirectories containing remaining non-duplicate files remain present.
 
-## Verification Scenario 3: Automated Integration Test Suite
+## Verification Scenario 3: Sweep On-Demand Empty Directories and 0-Byte Dummy Files
 
-Run unit and integration tests verifying directory cleanup, root protection, and boundary handling:
+1. Preview sweep for orphaned empty folders and 0-byte dummy files across a whole drive:
+   ```bash
+   cargo run -- dedup prune --drive "/Volumes/Seagate Backup Plus Drive" --clean-empty-dirs
+   ```
+2. Execute sweep and clean up ghost directory trees:
+   ```bash
+   cargo run -- dedup prune --drive "/Volumes/Seagate Backup Plus Drive" --clean-empty-dirs --execute
+   ```
+3. Verify that 0-byte corrupt/dummy files are unlinked and all containing empty directories are cleanly removed up to the drive mount point ceiling.
+
+## Verification Scenario 4: Automated Integration Test Suite
+
+Run unit and integration tests verifying directory cleanup, root protection, 0-byte file handling, and boundary handling:
 ```bash
 cargo test --test test_drive_pruner
 ```
