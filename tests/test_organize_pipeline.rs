@@ -435,6 +435,7 @@ async fn test_organize_pipeline_protected_source_rejected() {
         batch_size: 100,
         channel_capacity: 100,
         quiet: true,
+        keep_source_dir: true,
     };
 
     let result = service.execute(&sink, &config, options).await;
@@ -468,6 +469,7 @@ async fn test_organize_pipeline_missing_source_rejected() {
         batch_size: 100,
         channel_capacity: 100,
         quiet: true,
+        keep_source_dir: true,
     };
 
     let result = service.execute(&sink, &config, options).await;
@@ -522,6 +524,7 @@ async fn test_organize_pipeline_dry_run_and_execution() {
         batch_size: 100,
         channel_capacity: 100,
         quiet: true,
+        keep_source_dir: true,
     };
 
     let dry_report = service
@@ -548,6 +551,7 @@ async fn test_organize_pipeline_dry_run_and_execution() {
         batch_size: 100,
         channel_capacity: 100,
         quiet: true,
+        keep_source_dir: true,
     };
 
     let live_report = service
@@ -618,6 +622,7 @@ async fn test_organize_pipeline_skip_prune() {
         batch_size: 100,
         channel_capacity: 100,
         quiet: true,
+        keep_source_dir: true,
     };
 
     let report = service
@@ -630,4 +635,76 @@ async fn test_organize_pipeline_skip_prune() {
     assert_eq!(report.files_pruned, 0);
     // Source file must be kept because skip_prune was set
     assert!(test_file.exists());
+}
+
+#[tokio::test]
+async fn test_organize_pipeline_cleans_empty_source_and_parents_up_to_drive_mount() {
+    let temp = tempdir().unwrap();
+    let primary_dir = temp.path().join("SP-1");
+    let replica_dir = temp.path().join("SP-2");
+    let external_drive = temp.path().join("ExternalDrive");
+    let event_folder = external_drive.join("2026").join("18Jul2026");
+
+    fs::create_dir_all(primary_dir.join("media/master")).unwrap();
+    fs::create_dir_all(replica_dir.join("media/master")).unwrap();
+    fs::create_dir_all(&event_folder).unwrap();
+
+    let test_file = event_folder.join("photo.jpg");
+    let jpeg_data = [
+        0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, b'J', b'F', b'I', b'F', 0x00, 0x01, 0x01, 0x00, 0x00,
+        0x01, 0x00, 0x01, 0x00, 0x00, 0xFF, 0xDB, 0x00, 0x43, 0x00, 0x08, 0x06, 0x06, 0x07, 0x06,
+        0x05, 0x08, 0x07, 0x07, 0x07, 0x09, 0x09, 0x08, 0x0A, 0x0C, 0x14, 0x0D, 0x0C, 0x0B, 0x0B,
+        0x0C, 0x19, 0x12, 0x13, 0x0F, 0x14, 0x1D, 0x1A, 0x1F, 0x1E, 0x1D, 0x1A, 0x1C, 0x1C, 0x20,
+        0x24, 0x2E, 0x27, 0x20, 0x22, 0x2C, 0x23, 0x1C, 0x1C, 0x28, 0x37, 0x29, 0x2C, 0x30, 0x31,
+        0x34, 0x34, 0x34, 0x1F, 0x27, 0x39, 0x3D, 0x38, 0x32, 0x3C, 0x2E, 0x33, 0x34, 0x32, 0xFF,
+        0xC0, 0x00, 0x0B, 0x08, 0x00, 0x01, 0x00, 0x01, 0x01, 0x01, 0x11, 0x00, 0xFF, 0xC4, 0x00,
+        0x1F, 0x00, 0x00, 0x01, 0x05, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B,
+        0xFF, 0xDA, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3F, 0x00, 0x7F, 0x00, 0xFF, 0xD9,
+    ];
+    fs::write(&test_file, jpeg_data).unwrap();
+
+    let mut config = create_test_config(&primary_dir, &replica_dir);
+    config.drives.push(DriveDefinition {
+        id: "external".to_string(),
+        mount_path: external_drive.clone(),
+        master_path: external_drive.clone(),
+        group: "staging".to_string(),
+    });
+
+    let sink: Arc<dyn MetadataStorageSink> = Arc::new(MockOrganizeStorageSink::default());
+    let service = OrganizePipelineService::new();
+
+    let options = OrganizePipelineOptions {
+        source_path: Some(event_folder.clone()),
+        dry_run: false,
+        skip_prune: false,
+        no_verify_hash: false,
+        buffer_size: "1M".to_string(),
+        recheck_disk_hash: false,
+        force_reindex: false,
+        batch_size: 100,
+        channel_capacity: 100,
+        quiet: true,
+        keep_source_dir: false,
+    };
+
+    let report = service
+        .execute(&sink, &config, options)
+        .await
+        .expect("Execution should succeed");
+
+    assert_eq!(report.files_ingested, 1);
+    assert_eq!(report.files_replicated, 1);
+    assert_eq!(report.files_pruned, 1);
+    assert_eq!(report.empty_directories_removed, 2);
+
+    // Source file must be deleted
+    assert!(!test_file.exists());
+    // 18Jul2026 must be deleted
+    assert!(!event_folder.exists());
+    // Parent 2026 must be deleted
+    assert!(!external_drive.join("2026").exists());
+    // But external drive root MUST be preserved!
+    assert!(external_drive.exists());
 }

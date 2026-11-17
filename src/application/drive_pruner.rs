@@ -76,6 +76,23 @@ pub struct DrivePrunerOptions {
     pub execute: bool,
     pub require_master_disk: bool,
     pub manifest_out: Option<PathBuf>,
+    pub boundary_ceiling: Option<PathBuf>,
+    pub prune_empty_source_root: bool,
+    pub clean_empty_dirs: bool,
+}
+
+impl Default for DrivePrunerOptions {
+    fn default() -> Self {
+        Self {
+            drive_identifier: None,
+            execute: false,
+            require_master_disk: false,
+            manifest_out: None,
+            boundary_ceiling: None,
+            prune_empty_source_root: false,
+            clean_empty_dirs: false,
+        }
+    }
 }
 
 impl DrivePrunerOptions {
@@ -83,8 +100,7 @@ impl DrivePrunerOptions {
         Self {
             drive_identifier: Some(drive.into()),
             execute,
-            require_master_disk: false,
-            manifest_out: None,
+            ..Default::default()
         }
     }
 
@@ -92,8 +108,7 @@ impl DrivePrunerOptions {
         Self {
             drive_identifier: None,
             execute,
-            require_master_disk: false,
-            manifest_out: None,
+            ..Default::default()
         }
     }
 }
@@ -650,11 +665,14 @@ impl DrivePruningService {
 
         // Clean up empty ancestor directories
         let (empty_dirs_count, dir_errors) = if options.drive_identifier.is_some() {
-            Self::clean_empty_ancestor_directories(
+            Self::clean_empty_ancestor_directories_with_options(
                 &manifest.mount_path,
                 &affected_file_paths,
                 &guard,
                 options.execute,
+                options.boundary_ceiling.as_deref(),
+                !options.prune_empty_source_root,
+                options.clean_empty_dirs,
             )
         } else {
             // Group affected file paths by their prune root
@@ -692,11 +710,14 @@ impl DrivePruningService {
             let mut total_empty = 0usize;
             let mut errs = Vec::new();
             for (root, paths) in paths_by_root {
-                let (cnt, sub_errs) = Self::clean_empty_ancestor_directories(
+                let (cnt, sub_errs) = Self::clean_empty_ancestor_directories_with_options(
                     &root,
                     &paths,
                     &guard,
                     options.execute,
+                    options.boundary_ceiling.as_deref(),
+                    !options.prune_empty_source_root,
+                    options.clean_empty_dirs,
                 );
                 total_empty += cnt;
                 errs.extend(sub_errs);
@@ -746,19 +767,26 @@ impl DrivePruningService {
     }
 
     /// Cleans up empty ancestor directories bottom-up starting from the parent directories of
-    /// deleted duplicate files, stopping at the target prune root.
+    /// deleted duplicate files, stopping at the target prune root or boundary ceiling.
     ///
     /// Guarantees:
-    /// - `prune_root` itself is NEVER deleted.
+    /// - Boundary ceiling (e.g. drive mount point) is NEVER deleted.
+    /// - If `preserve_prune_root` is true, `prune_root` itself is NEVER deleted.
     /// - Protected canonical master archive paths are NEVER deleted.
+    /// - Standard system and user home roots are NEVER deleted.
     /// - Only empty directories (or those containing only disposable OS files) are removed.
-    pub fn clean_empty_ancestor_directories(
+    pub fn clean_empty_ancestor_directories_with_options(
         prune_root: &Path,
         affected_file_paths: &[PathBuf],
         guard: &ArchiveProtectionGuard,
         execute: bool,
+        boundary_ceiling: Option<&Path>,
+        preserve_prune_root: bool,
+        scan_subdirs: bool,
     ) -> (usize, Vec<String>) {
-        let norm_root = ArchiveProtectionGuard::canonicalize_safe(prune_root);
+        let norm_prune_root = ArchiveProtectionGuard::canonicalize_safe(prune_root);
+        let effective_ceiling = boundary_ceiling.unwrap_or(prune_root);
+        let norm_ceiling = ArchiveProtectionGuard::canonicalize_safe(effective_ceiling);
         let mut removed_count = 0usize;
         let mut errors = Vec::new();
 
@@ -771,6 +799,16 @@ impl DrivePruningService {
                 }
             }
 
+            // If prune_root itself is eligible for pruning (preserve_prune_root == false), add it
+            if !preserve_prune_root && prune_root.exists() && prune_root.is_dir() {
+                candidate_dirs.insert(prune_root.to_path_buf());
+            }
+
+            // If scan_subdirs is requested, recursively add all subdirectories under prune_root
+            if scan_subdirs && prune_root.exists() && prune_root.is_dir() {
+                collect_subdirectories_recursive(prune_root, &mut candidate_dirs, guard);
+            }
+
             // Sort candidates by component count descending (deepest paths first)
             let mut sorted_dirs: Vec<PathBuf> = candidate_dirs.into_iter().collect();
             sorted_dirs.sort_by_key(|p| std::cmp::Reverse(p.components().count()));
@@ -779,14 +817,29 @@ impl DrivePruningService {
                 let mut current = dir;
                 while let Some(parent) = current.parent() {
                     let norm_current = ArchiveProtectionGuard::canonicalize_safe(&current);
-                    // Boundary Guard 1: Never delete target prune root or outside it
-                    if !norm_current.starts_with(&norm_root) || norm_current == norm_root {
+
+                    // Boundary Guard 1: Never delete boundary ceiling or climb outside it
+                    if !norm_current.starts_with(&norm_ceiling) || norm_current == norm_ceiling {
                         break;
                     }
-                    // Boundary Guard 2: Never delete protected master archives
+
+                    // Boundary Guard 2: If preserve_prune_root is true, never delete prune_root or outside it
+                    if preserve_prune_root
+                        && (!norm_current.starts_with(&norm_prune_root) || norm_current == norm_prune_root)
+                    {
+                        break;
+                    }
+
+                    // Boundary Guard 3: Never delete protected master archives
                     if guard.is_protected_path(&current) {
                         break;
                     }
+
+                    // Boundary Guard 4: Never delete system or home root
+                    if is_system_or_home_root(&norm_current) {
+                        break;
+                    }
+
                     if !current.exists() {
                         current = parent.to_path_buf();
                         continue;
@@ -846,6 +899,14 @@ impl DrivePruningService {
                 }
             }
 
+            if !preserve_prune_root && prune_root.exists() && prune_root.is_dir() {
+                candidate_dirs.insert(prune_root.to_path_buf());
+            }
+
+            if scan_subdirs && prune_root.exists() && prune_root.is_dir() {
+                collect_subdirectories_recursive(prune_root, &mut candidate_dirs, guard);
+            }
+
             let mut sorted_dirs: Vec<PathBuf> = candidate_dirs.into_iter().collect();
             sorted_dirs.sort_by_key(|p| std::cmp::Reverse(p.components().count()));
 
@@ -853,12 +914,25 @@ impl DrivePruningService {
                 let mut current = dir;
                 while let Some(parent) = current.parent() {
                     let norm_current = ArchiveProtectionGuard::canonicalize_safe(&current);
-                    if !norm_current.starts_with(&norm_root) || norm_current == norm_root {
+
+                    if !norm_current.starts_with(&norm_ceiling) || norm_current == norm_ceiling {
                         break;
                     }
+
+                    if preserve_prune_root
+                        && (!norm_current.starts_with(&norm_prune_root) || norm_current == norm_prune_root)
+                    {
+                        break;
+                    }
+
                     if guard.is_protected_path(&current) {
                         break;
                     }
+
+                    if is_system_or_home_root(&norm_current) {
+                        break;
+                    }
+
                     if !current.exists() {
                         current = parent.to_path_buf();
                         continue;
@@ -904,6 +978,75 @@ impl DrivePruningService {
         (removed_count, errors)
     }
 
+    /// Cleans up empty ancestor directories bottom-up starting from the parent directories of
+    /// deleted duplicate files, stopping at the target prune root.
+    ///
+    /// Guarantees:
+    /// - `prune_root` itself is NEVER deleted.
+    /// - Protected canonical master archive paths are NEVER deleted.
+    /// - Only empty directories (or those containing only disposable OS files) are removed.
+    pub fn clean_empty_ancestor_directories(
+        prune_root: &Path,
+        affected_file_paths: &[PathBuf],
+        guard: &ArchiveProtectionGuard,
+        execute: bool,
+    ) -> (usize, Vec<String>) {
+        Self::clean_empty_ancestor_directories_with_options(
+            prune_root,
+            affected_file_paths,
+            guard,
+            execute,
+            None,
+            true,
+            false,
+        )
+    }
+
+    /// Resolves the upper boundary ceiling (e.g. drive mount point, macOS /Volumes/<drive>,
+    /// or user home directory) above which empty directory cleanup must strictly stop.
+    pub fn resolve_drive_boundary_ceiling(
+        path: &Path,
+        config: &DriveConfiguration,
+        guard: &ArchiveProtectionGuard,
+    ) -> Option<PathBuf> {
+        let norm_path = ArchiveProtectionGuard::canonicalize_safe(path);
+
+        // 1. Check if path starts with any configured non-protected drive mount path
+        let mut matching_drives: Vec<&DriveDefinition> = config
+            .drives
+            .iter()
+            .filter(|d| {
+                let canonical_mount = ArchiveProtectionGuard::canonicalize_safe(&d.mount_path);
+                !guard.is_protected_path(&canonical_mount) && norm_path.starts_with(&canonical_mount)
+            })
+            .collect();
+        matching_drives.sort_by_key(|d| std::cmp::Reverse(d.mount_path.as_os_str().len()));
+        if let Some(drive) = matching_drives.first() {
+            return Some(ArchiveProtectionGuard::canonicalize_safe(&drive.mount_path));
+        }
+
+        // 2. If macOS /Volumes/<drive>, boundary is /Volumes/<drive>
+        if norm_path.starts_with("/Volumes") {
+            let components: Vec<_> = norm_path.components().collect();
+            if components.len() >= 3 {
+                let vol_path: PathBuf = components[..3].iter().collect();
+                if !guard.is_protected_path(&vol_path) {
+                    return Some(vol_path);
+                }
+            }
+        }
+
+        // 3. User home directory boundary: e.g. /Users/<username> or /home/<username>
+        let components: Vec<_> = norm_path.components().collect();
+        if (norm_path.starts_with("/Users") || norm_path.starts_with("/home")) && components.len() >= 3 {
+            let home_path: PathBuf = components[..3].iter().collect();
+            return Some(home_path);
+        }
+
+        // 4. Default fallback: parent of path if available, or path
+        path.parent().map(|p| p.to_path_buf())
+    }
+
     /// Resolves the boundary prune root for a given file path when pruning across all drives.
     pub fn resolve_file_prune_root(
         file_path: &Path,
@@ -942,4 +1085,43 @@ impl DrivePruningService {
 
         None
     }
+}
+
+/// Recursively collects all subdirectories under `dir`, strictly ignoring protected archive roots.
+fn collect_subdirectories_recursive(
+    dir: &Path,
+    dirs: &mut HashSet<PathBuf>,
+    guard: &ArchiveProtectionGuard,
+) {
+    if guard.is_protected_path(dir) {
+        return;
+    }
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() && !guard.is_protected_path(&path) {
+                dirs.insert(path.clone());
+                collect_subdirectories_recursive(&path, dirs, guard);
+            }
+        }
+    }
+}
+
+/// Identifies whether a canonical path corresponds to a critical system directory or user home root.
+fn is_system_or_home_root(norm_path: &Path) -> bool {
+    let s = norm_path.to_string_lossy();
+    if s == "/" || s == "/Volumes" || s == "/Users" || s == "/home" || s == "/tmp" || s == "/private" {
+        return true;
+    }
+    let count = norm_path.components().count();
+    if count <= 1 {
+        return true;
+    }
+    if norm_path.starts_with("/Volumes") && count <= 3 {
+        return true;
+    }
+    if (norm_path.starts_with("/Users") || norm_path.starts_with("/home")) && count <= 3 {
+        return true;
+    }
+    false
 }

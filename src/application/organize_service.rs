@@ -40,6 +40,8 @@ pub struct OrganizePipelineOptions {
     pub channel_capacity: usize,
     /// Suppress non-essential telemetry
     pub quiet: bool,
+    /// Keep the source directory itself even if all files are ingested and it becomes empty (defaults to false)
+    pub keep_source_dir: bool,
 }
 
 /// Comprehensive execution report for the full organize pipeline.
@@ -302,6 +304,11 @@ impl OrganizePipelineService {
             }
             let stage5_start = Instant::now();
 
+            let guard = ArchiveProtectionGuard::from_config(config);
+            let boundary_ceiling = options.source_path.as_ref().and_then(|sp| {
+                DrivePruningService::resolve_drive_boundary_ceiling(sp, config, &guard)
+            });
+
             let pruner_service = DrivePruningService::new();
             let pruner_options = DrivePrunerOptions {
                 drive_identifier: options
@@ -311,6 +318,9 @@ impl OrganizePipelineService {
                 execute: !options.dry_run,
                 require_master_disk: true,
                 manifest_out: None,
+                boundary_ceiling,
+                prune_empty_source_root: !options.keep_source_dir,
+                clean_empty_dirs: true,
             };
 
             let prune_report = pruner_service

@@ -284,6 +284,10 @@ struct OrganizeArgs {
     #[arg(long, default_value_t = false)]
     force: bool,
 
+    /// Keep the source directory itself even if all files are ingested and it becomes empty (defaults to false)
+    #[arg(long, default_value_t = false)]
+    keep_source_dir: bool,
+
     /// Batch size for discovery and extraction
     #[arg(short = 'b', long, default_value_t = 500)]
     batch_size: usize,
@@ -461,6 +465,10 @@ struct PruneArgs {
     /// Save removal audit manifest to JSON file
     #[arg(short = 'o', long)]
     manifest_out: Option<PathBuf>,
+
+    /// Also scan and clean existing empty directories across the target drive/path
+    #[arg(long, default_value_t = false)]
+    clean_empty_dirs: bool,
 
     /// MongoDB connection URI override
     #[arg(long, visible_alias = "db-uri", env = "MONGODB_URI")]
@@ -1314,6 +1322,9 @@ async fn run_dedup_prune(args: PruneArgs) -> Result<(), Box<dyn std::error::Erro
         execute: args.execute,
         require_master_disk: args.require_master_disk,
         manifest_out: args.manifest_out,
+        boundary_ceiling: None,
+        prune_empty_source_root: false,
+        clean_empty_dirs: args.clean_empty_dirs,
     };
 
     let report = service.prune_drive(&sink, &drive_config, options).await?;
@@ -2129,6 +2140,7 @@ async fn run_organize_cli(args: OrganizeArgs) -> Result<(), Box<dyn std::error::
         batch_size: args.batch_size,
         channel_capacity: args.channel_capacity,
         quiet: args.quiet,
+        keep_source_dir: args.keep_source_dir,
     };
 
     let service = OrganizePipelineService::new();

@@ -397,6 +397,7 @@ async fn test_drive_pruner_manifest_and_safety_checks() {
         execute: false,
         require_master_disk: false,
         manifest_out: Some(manifest_path.clone()),
+        ..Default::default()
     };
 
     let report_dry = service
@@ -420,6 +421,7 @@ async fn test_drive_pruner_manifest_and_safety_checks() {
         execute: true,
         require_master_disk: false,
         manifest_out: None,
+        ..Default::default()
     };
 
     let report_exec = service
@@ -533,6 +535,7 @@ async fn test_drive_pruner_fallback_to_hash_verification() {
         execute: true,
         require_master_disk: true,
         manifest_out: None,
+        ..Default::default()
     };
 
     let report = service
@@ -624,6 +627,7 @@ async fn test_prune_drive_rejects_primary_and_replica_targets() {
         execute: false,
         require_master_disk: false,
         manifest_out: None,
+        ..Default::default()
     };
     let err_primary = service
         .prune_drive(&sink, &config, opts_primary_master)
@@ -646,6 +650,7 @@ async fn test_prune_drive_rejects_primary_and_replica_targets() {
         execute: false,
         require_master_disk: false,
         manifest_out: None,
+        ..Default::default()
     };
     let err_replica = service
         .prune_drive(&sink, &config, opts_replica_master)
@@ -668,6 +673,7 @@ async fn test_prune_drive_rejects_primary_and_replica_targets() {
         execute: false,
         require_master_disk: false,
         manifest_out: None,
+        ..Default::default()
     };
     let res_unorg = service.prune_drive(&sink, &config, opts_unorg).await;
     assert!(
@@ -681,6 +687,7 @@ async fn test_prune_drive_rejects_primary_and_replica_targets() {
         execute: false,
         require_master_disk: false,
         manifest_out: None,
+        ..Default::default()
     };
     let res_primary_drive = service
         .prune_drive(&sink, &config, opts_primary_drive)
@@ -842,6 +849,7 @@ async fn test_prune_drive_hard_deletes_database_records() {
         execute: true,
         require_master_disk: true,
         manifest_out: None,
+        ..Default::default()
     };
 
     let report = service.prune_drive(&sink, &config, opts).await.unwrap();
@@ -910,6 +918,7 @@ async fn test_prune_drive_purges_preexisting_removed_records() {
         execute: true,
         require_master_disk: false,
         manifest_out: None,
+        ..Default::default()
     };
 
     let report = service.prune_drive(&sink, &config, opts).await.unwrap();
@@ -994,6 +1003,7 @@ async fn test_prune_drive_cleans_empty_ancestor_directories_and_preserves_root()
         execute: true,
         require_master_disk: true,
         manifest_out: None,
+        ..Default::default()
     };
 
     let report = service.prune_drive(&sink, &config, opts).await.unwrap();
@@ -1089,6 +1099,7 @@ async fn test_prune_drive_dry_run_simulates_empty_directories() {
         execute: false, // DRY-RUN
         require_master_disk: true,
         manifest_out: None,
+        ..Default::default()
     };
 
     let report = service.prune_drive(&sink, &config, opts).await.unwrap();
