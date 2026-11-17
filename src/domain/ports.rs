@@ -223,6 +223,15 @@ pub trait MetadataStorageSink: Send + Sync {
         mount_prefix: Option<&str>,
     ) -> Result<usize, StorageError>;
 
+    /// Purges all zero-byte (unusable corrupt/dummy) documents matching a mount path prefix.
+    /// Returns the number of purged documents.
+    async fn purge_zero_byte_records(
+        &self,
+        _mount_prefix: Option<&str>,
+    ) -> Result<usize, StorageError> {
+        Ok(0)
+    }
+
     /// Queries all content groups grouped by cryptographic hash across the database,
     /// including unique assets (count == 1) and duplicate clusters (count > 1).
     async fn query_all_content_groups(

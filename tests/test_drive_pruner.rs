@@ -1043,6 +1043,47 @@ async fn test_prune_drive_cleans_empty_ancestor_directories_and_preserves_root()
 }
 
 #[tokio::test]
+async fn test_prune_drive_cleans_zero_byte_dummy_files_and_removes_empty_directories() {
+    let tmp = tempdir().unwrap();
+    let primary_dir = tmp.path().join("primary");
+    let replica_dir = tmp.path().join("replica");
+    let staging_root = tmp.path().join("staging");
+    let photos_videos = staging_root.join("PhotosVideos");
+    let dummy_folder = photos_videos.join("0256").join("01-January").join("Photos");
+
+    std::fs::create_dir_all(&primary_dir).unwrap();
+    std::fs::create_dir_all(&replica_dir).unwrap();
+    std::fs::create_dir_all(&dummy_folder).unwrap();
+
+    // Create a 0-byte corrupt/dummy file
+    let zero_byte_file = dummy_folder.join("DSC_0256.JPG");
+    std::fs::write(&zero_byte_file, b"").unwrap();
+    assert_eq!(std::fs::metadata(&zero_byte_file).unwrap().len(), 0);
+
+    let config = make_multi_drive_config(&primary_dir, &replica_dir, &staging_root);
+    let sink = MockPruneStorageSink::default();
+    let service = DrivePruningService::new();
+
+    // Clean empty dirs on staging
+    let opts = DrivePrunerOptions {
+        drive_identifier: Some(staging_root.to_string_lossy().to_string()),
+        execute: true,
+        clean_empty_dirs: true,
+        ..Default::default()
+    };
+
+    let report = service.prune_drive(&sink, &config, opts).await.unwrap();
+
+    // 0-byte dummy file must be unlinked and empty directory hierarchy removed
+    assert!(!zero_byte_file.exists(), "0-byte dummy file must be unlinked");
+    assert!(!dummy_folder.exists(), "Empty dummy folder must be removed");
+    assert!(!photos_videos.join("0256").exists(), "Empty 0256 folder must be removed");
+    assert!(!photos_videos.exists(), "Empty PhotosVideos folder must be removed");
+    assert!(staging_root.exists(), "Staging root mount must be preserved");
+    assert_eq!(report.empty_directories_removed, 4); // Photos, 01-January, 0256, PhotosVideos
+}
+
+#[tokio::test]
 async fn test_prune_drive_dry_run_simulates_empty_directories() {
     let tmp = tempdir().unwrap();
     let primary_dir = tmp.path().join("primary");

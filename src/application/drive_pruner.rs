@@ -20,8 +20,22 @@ pub fn is_disposable_os_file(name: &str) -> bool {
     )
 }
 
-/// Inspects a directory to determine if it is empty or contains only disposable OS files.
-/// If `execute` is true, disposable OS files within an otherwise empty directory are unlinked.
+/// Identifies whether a directory entry is a disposable file (OS metadata or 0-byte corrupt/dummy file).
+pub fn is_disposable_file(path: &Path, name: &str) -> bool {
+    if is_disposable_os_file(name) {
+        return true;
+    }
+    // Zero-byte dummy/corrupt files in source directories
+    if let Ok(meta) = std::fs::symlink_metadata(path) {
+        if meta.is_file() && meta.len() == 0 {
+            return true;
+        }
+    }
+    false
+}
+
+/// Inspects a directory to determine if it is empty or contains only disposable OS files or 0-byte dummy files.
+/// If `execute` is true, disposable files within an otherwise empty directory are unlinked.
 fn check_directory_empty(dir: &Path, execute: bool) -> Result<bool, std::io::Error> {
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
@@ -34,8 +48,9 @@ fn check_directory_empty(dir: &Path, execute: bool) -> Result<bool, std::io::Err
         let entry = entry?;
         let file_name = entry.file_name();
         let name_str = file_name.to_string_lossy();
-        if is_disposable_os_file(&name_str) {
-            disposable_files.push(entry.path());
+        let path = entry.path();
+        if is_disposable_file(&path, &name_str) {
+            disposable_files.push(path);
         } else {
             return Ok(false);
         }
@@ -744,6 +759,9 @@ impl DrivePruningService {
                     ));
                 }
             }
+            if let Ok(cleaned) = sink.purge_zero_byte_records(mount_filter.as_deref()).await {
+                records_purged += cleaned;
+            }
         }
 
         Ok(PruneExecutionReport {
@@ -946,7 +964,7 @@ impl DrivePruningService {
                             if let Ok(entry) = entry_res {
                                 let file_name = entry.file_name();
                                 let name_str = file_name.to_string_lossy();
-                                if is_disposable_os_file(&name_str) {
+                                if is_disposable_file(&entry.path(), &name_str) {
                                     continue;
                                 }
                                 let norm_entry =

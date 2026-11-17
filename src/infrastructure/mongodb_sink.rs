@@ -691,6 +691,37 @@ impl MetadataStorageSink for MongoDbStorageSink {
         Ok(res.deleted_count as usize)
     }
 
+    async fn purge_zero_byte_records(
+        &self,
+        mount_prefix: Option<&str>,
+    ) -> Result<usize, StorageError> {
+        let mut filter = doc! {
+            "file_context.file_size_bytes": 0
+        };
+
+        if let Some(prefix) = mount_prefix {
+            let escaped_prefix = regex_escape(prefix);
+            filter.insert(
+                "$or",
+                vec![
+                    doc! { "file_context.scanned_root": { "$regex": format!("^{}", escaped_prefix) } },
+                    doc! { "file_context.file_path": { "$regex": format!("^{}", escaped_prefix) } },
+                ],
+            );
+        }
+
+        let res =
+            self.collection
+                .delete_many(filter)
+                .await
+                .map_err(|e| StorageError::QueryFailed {
+                    collection: self.config.collection_name.clone(),
+                    message: format!("Failed purging zero-byte records: {}", e),
+                })?;
+
+        Ok(res.deleted_count as usize)
+    }
+
     async fn query_all_content_groups(
         &self,
         mount_prefix: Option<&str>,
