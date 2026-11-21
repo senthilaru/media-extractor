@@ -292,6 +292,10 @@ struct OrganizeArgs {
     #[arg(long, default_value_t = false)]
     require_master_disk: bool,
 
+    /// Force full catalog re-audit across all assets instead of scoped source audit
+    #[arg(long, default_value_t = false)]
+    recheck_all: bool,
+
     /// Batch size for discovery and extraction
     #[arg(short = 'b', long, default_value_t = 500)]
     batch_size: usize,
@@ -2146,6 +2150,7 @@ async fn run_organize_cli(args: OrganizeArgs) -> Result<(), Box<dyn std::error::
         quiet: args.quiet,
         keep_source_dir: args.keep_source_dir,
         require_master_disk: args.require_master_disk,
+        recheck_all: args.recheck_all,
     };
 
     let service = OrganizePipelineService::new();

@@ -479,7 +479,7 @@ impl ReplicaSyncService {
     pub async fn execute_sync_plan(
         &self,
         sink: &dyn MetadataStorageSink,
-        _config: &DriveConfiguration,
+        config: &DriveConfiguration,
         plan: ReplicaSyncPlan,
         options: ReplicaSyncOptions,
     ) -> Result<ReplicaSyncReport, DeduplicationError> {
@@ -805,7 +805,16 @@ impl ReplicaSyncService {
                         last_synced_at: None,
                     });
 
-                rep_state.pending_drives.retain(|d| d != replica_drive_id);
+                // Remove all drives in the same replica pool group from pending_drives
+                let rep_drive = config.drives.iter().find(|d| d.id == *replica_drive_id);
+                if let Some(drive) = rep_drive {
+                    let pool_volumes = config.get_pool_volumes(&drive.group);
+                    let pool_ids: std::collections::HashSet<&str> =
+                        pool_volumes.iter().map(|v| v.id.as_str()).collect();
+                    rep_state.pending_drives.retain(|d| !pool_ids.contains(d.as_str()));
+                } else {
+                    rep_state.pending_drives.retain(|d| d != replica_drive_id);
+                }
 
                 if !rep_state.replicated_drives.contains(replica_drive_id) {
                     rep_state.replicated_drives.push(replica_drive_id.clone());

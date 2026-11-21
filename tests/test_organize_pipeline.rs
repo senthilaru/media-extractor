@@ -279,6 +279,45 @@ impl MetadataStorageSink for MockOrganizeStorageSink {
         Ok(groups.into_iter().collect())
     }
 
+    async fn query_content_groups_for_hashes(
+        &self,
+        hashes: &[String],
+    ) -> Result<Vec<(String, Vec<MediaMetadataDocument>)>, StorageError> {
+        let guard = self.documents.lock().unwrap();
+        let hash_set: std::collections::HashSet<&str> =
+            hashes.iter().map(|s| s.as_str()).collect();
+        let mut groups: HashMap<String, Vec<MediaMetadataDocument>> = HashMap::new();
+        for doc in guard.values() {
+            if let Some(ref fp) = doc.fingerprint {
+                if hash_set.contains(fp.cryptographic_hash.as_str()) {
+                    groups
+                        .entry(fp.cryptographic_hash.clone())
+                        .or_default()
+                        .push(doc.clone());
+                }
+            }
+        }
+        Ok(groups.into_iter().collect())
+    }
+
+    async fn query_distinct_hashes_for_prefix(
+        &self,
+        mount_prefix: &str,
+    ) -> Result<Vec<String>, StorageError> {
+        let guard = self.documents.lock().unwrap();
+        let hashes: std::collections::HashSet<String> = guard
+            .values()
+            .filter(|d| {
+                d.file_context
+                    .file_path
+                    .to_string_lossy()
+                    .starts_with(mount_prefix)
+            })
+            .filter_map(|d| d.fingerprint.as_ref().map(|fp| fp.cryptographic_hash.clone()))
+            .collect();
+        Ok(hashes.into_iter().collect())
+    }
+
     async fn query_canonical_masters(&self) -> Result<Vec<MediaMetadataDocument>, StorageError> {
         let guard = self.documents.lock().unwrap();
         let masters = guard
@@ -437,6 +476,7 @@ async fn test_organize_pipeline_protected_source_rejected() {
         quiet: true,
         keep_source_dir: true,
         require_master_disk: false,
+        recheck_all: false,
     };
 
     let result = service.execute(&sink, &config, options).await;
@@ -472,6 +512,7 @@ async fn test_organize_pipeline_missing_source_rejected() {
         quiet: true,
         keep_source_dir: true,
         require_master_disk: false,
+        recheck_all: false,
     };
 
     let result = service.execute(&sink, &config, options).await;
@@ -528,6 +569,7 @@ async fn test_organize_pipeline_dry_run_and_execution() {
         quiet: true,
         keep_source_dir: true,
         require_master_disk: false,
+        recheck_all: false,
     };
 
     let dry_report = service
@@ -556,6 +598,7 @@ async fn test_organize_pipeline_dry_run_and_execution() {
         quiet: true,
         keep_source_dir: true,
         require_master_disk: false,
+        recheck_all: false,
     };
 
     let live_report = service
@@ -628,6 +671,7 @@ async fn test_organize_pipeline_skip_prune() {
         quiet: true,
         keep_source_dir: true,
         require_master_disk: false,
+        recheck_all: false,
     };
 
     let report = service
@@ -693,6 +737,7 @@ async fn test_organize_pipeline_cleans_empty_source_and_parents_up_to_drive_moun
         quiet: true,
         keep_source_dir: false,
         require_master_disk: false,
+        recheck_all: false,
     };
 
     let report = service

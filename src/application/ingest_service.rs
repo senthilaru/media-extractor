@@ -615,16 +615,18 @@ impl MasterIngestService {
             .map(|d| d.group.clone())
             .unwrap_or_else(|| "primary".to_string());
 
-        let configured_replica_drives: Vec<String> = config
-            .drives
-            .iter()
-            .filter(|d| {
-                d.id != plan.target_drive_id
-                    && (d.group.starts_with("replica")
-                        || d.group.eq_ignore_ascii_case("secondary"))
-            })
-            .map(|d| d.id.clone())
-            .collect();
+        // Deduplicate by replica group: A single copy is maintained per replica pool (e.g. replica1, replica2).
+        let mut seen_replica_groups = std::collections::HashSet::new();
+        let mut configured_replica_drives: Vec<String> = Vec::new();
+        for d in &config.drives {
+            if d.id != plan.target_drive_id
+                && (d.group.starts_with("replica")
+                    || d.group.eq_ignore_ascii_case("secondary"))
+                && seen_replica_groups.insert(d.group.clone())
+            {
+                configured_replica_drives.push(d.id.clone());
+            }
+        }
 
         let mut source_updates: Vec<(Uuid, DeduplicationMetadata)> = Vec::new();
         let mut new_master_docs: Vec<MediaMetadataDocument> = Vec::new();

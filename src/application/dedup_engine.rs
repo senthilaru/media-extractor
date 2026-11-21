@@ -636,41 +636,17 @@ impl MediaDeduplicationEngine {
         Self::evaluate_content_group(docs, matcher)
     }
 
-    /// Runs universal classification over all assets in the catalog (both unique and duplicates).
-    pub async fn run_universal_classification(
+    /// Evaluates deduplication rules and persists classification updates for a list of content groups.
+    pub async fn classify_and_persist_content_groups(
         &self,
         sink: &dyn MetadataStorageSink,
         config: &DriveConfiguration,
+        content_groups: &[(String, Vec<MediaMetadataDocument>)],
         dry_run: bool,
+        start_time: Instant,
     ) -> Result<DeduplicationSummary, DeduplicationError> {
-        let start = Instant::now();
         let matcher = CanonicalPathMatcher::new(config.clone());
         let is_tty = std::io::stderr().is_terminal();
-
-        let pb = if is_tty {
-            let p = indicatif::ProgressBar::new_spinner();
-            p.set_style(
-                indicatif::ProgressStyle::default_spinner()
-                    .template("{spinner:.green} {msg} | Elapsed: {elapsed}")
-                    .unwrap_or_else(|_| indicatif::ProgressStyle::default_spinner()),
-            );
-            p.set_message("Querying catalog content groups from MongoDB...");
-            p.enable_steady_tick(std::time::Duration::from_millis(120));
-            Some(p)
-        } else {
-            eprintln!("Querying catalog content groups from MongoDB...");
-            None
-        };
-
-        // Step 1: Query all content groups (both unique count == 1 and duplicates count > 1)
-        let content_groups = sink.query_all_content_groups(None).await?;
-
-        if let Some(ref p) = pb {
-            p.set_message(format!(
-                "Classifying {} catalog groups...",
-                content_groups.len()
-            ));
-        }
 
         let mut total_files_scanned = 0usize;
         let mut unique_media_count = 0usize;
@@ -684,7 +660,7 @@ impl MediaDeduplicationEngine {
 
         let mut all_updates = Vec::new();
 
-        for (_hash, docs) in &content_groups {
+        for (_hash, docs) in content_groups {
             total_files_scanned += docs.len();
 
             let evaluations = Self::evaluate_content_group(docs, &matcher);
@@ -724,10 +700,6 @@ impl MediaDeduplicationEngine {
             if group_redundant_count > 0 {
                 duplicate_clusters_count += 1;
             }
-        }
-
-        if let Some(p) = pb {
-            p.finish_and_clear();
         }
 
         if !dry_run && !all_updates.is_empty() {
@@ -770,12 +742,101 @@ impl MediaDeduplicationEngine {
             near_duplicate_files: 0,
             total_reclaimable_bytes,
             tier_pruned_percentage: 0.0,
-            elapsed_seconds: start.elapsed().as_secs_f64(),
+            elapsed_seconds: start_time.elapsed().as_secs_f64(),
             canonical_masters_count,
             replica_files_preserved,
             needs_ingest_files,
             conflict_review_files,
         })
+    }
+
+    /// Runs scoped deduplication classification for a specific source path prefix.
+    /// Fast O(incoming) audit: queries only content groups matching hashes in the source path.
+    pub async fn run_scoped_classification(
+        &self,
+        sink: &dyn MetadataStorageSink,
+        config: &DriveConfiguration,
+        source_prefix: &str,
+        dry_run: bool,
+    ) -> Result<DeduplicationSummary, DeduplicationError> {
+        let start = Instant::now();
+        let is_tty = std::io::stderr().is_terminal();
+
+        let pb = if is_tty {
+            let p = indicatif::ProgressBar::new_spinner();
+            p.set_style(
+                indicatif::ProgressStyle::default_spinner()
+                    .template("{spinner:.green} {msg} | Elapsed: {elapsed}")
+                    .unwrap_or_else(|_| indicatif::ProgressStyle::default_spinner()),
+            );
+            p.set_message("Querying scoped catalog hashes from MongoDB...");
+            p.enable_steady_tick(std::time::Duration::from_millis(120));
+            Some(p)
+        } else {
+            eprintln!("Querying scoped catalog hashes from MongoDB...");
+            None
+        };
+
+        let hashes = sink.query_distinct_hashes_for_prefix(source_prefix).await?;
+
+        if let Some(ref p) = pb {
+            p.set_message(format!(
+                "Auditing {} distinct content groups for source...",
+                hashes.len()
+            ));
+        }
+
+        let content_groups = sink.query_content_groups_for_hashes(&hashes).await?;
+
+        if let Some(p) = pb {
+            p.finish_and_clear();
+        }
+
+        self.classify_and_persist_content_groups(sink, config, &content_groups, dry_run, start)
+            .await
+    }
+
+    /// Runs universal classification over all assets in the catalog (both unique and duplicates).
+    pub async fn run_universal_classification(
+        &self,
+        sink: &dyn MetadataStorageSink,
+        config: &DriveConfiguration,
+        dry_run: bool,
+    ) -> Result<DeduplicationSummary, DeduplicationError> {
+        let start = Instant::now();
+        let is_tty = std::io::stderr().is_terminal();
+
+        let pb = if is_tty {
+            let p = indicatif::ProgressBar::new_spinner();
+            p.set_style(
+                indicatif::ProgressStyle::default_spinner()
+                    .template("{spinner:.green} {msg} | Elapsed: {elapsed}")
+                    .unwrap_or_else(|_| indicatif::ProgressStyle::default_spinner()),
+            );
+            p.set_message("Querying catalog content groups from MongoDB...");
+            p.enable_steady_tick(std::time::Duration::from_millis(120));
+            Some(p)
+        } else {
+            eprintln!("Querying catalog content groups from MongoDB...");
+            None
+        };
+
+        // Step 1: Query all content groups (both unique count == 1 and duplicates count > 1)
+        let content_groups = sink.query_all_content_groups(None).await?;
+
+        if let Some(ref p) = pb {
+            p.set_message(format!(
+                "Classifying {} catalog groups...",
+                content_groups.len()
+            ));
+        }
+
+        if let Some(p) = pb {
+            p.finish_and_clear();
+        }
+
+        self.classify_and_persist_content_groups(sink, config, &content_groups, dry_run, start)
+            .await
     }
 
     /// Orchestrates database-driven deduplication:

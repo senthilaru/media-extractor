@@ -799,6 +799,109 @@ impl MetadataStorageSink for MongoDbStorageSink {
         Ok(content_groups)
     }
 
+    async fn query_content_groups_for_hashes(
+        &self,
+        hashes: &[String],
+    ) -> Result<Vec<(String, Vec<MediaMetadataDocument>)>, StorageError> {
+        if hashes.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut all_groups = Vec::new();
+        for chunk in hashes.chunks(2000) {
+            let chunk_bson: Vec<Bson> = chunk.iter().map(|h| Bson::String(h.clone())).collect();
+            let pipeline = vec![
+                doc! {
+                    "$match": {
+                        "fingerprint.cryptographic_hash": { "$in": chunk_bson }
+                    }
+                },
+                doc! {
+                    "$group": {
+                        "_id": "$fingerprint.cryptographic_hash",
+                        "count": { "$sum": 1 },
+                        "docs": { "$push": "$$ROOT" }
+                    }
+                },
+            ];
+
+            let mut cursor = self.collection.aggregate(pipeline).await.map_err(|e| {
+                StorageError::QueryFailed {
+                    collection: self.config.collection_name.clone(),
+                    message: format!("Scoped content group aggregation failed: {}", e),
+                }
+            })?;
+
+            while let Some(result_doc) = cursor.try_next().await.map_err(|e| {
+                StorageError::QueryFailed {
+                    collection: self.config.collection_name.clone(),
+                    message: format!("Failed reading scoped aggregation cursor: {}", e),
+                }
+            })? {
+                let hash_str = result_doc.get_str("_id").unwrap_or_default().to_string();
+                if hash_str.is_empty() {
+                    continue;
+                }
+
+                let raw_docs = result_doc.get_array("docs").cloned().unwrap_or_default();
+                let mut parsed_docs = Vec::with_capacity(raw_docs.len());
+
+                for raw_val in raw_docs {
+                    if let Bson::Document(d) = raw_val {
+                        match bson_document_to_doc(d) {
+                            Ok(parsed) => parsed_docs.push(parsed),
+                            Err(err) => {
+                                tracing::warn!(
+                                    hash = %hash_str,
+                                    error = %err,
+                                    "Skipping unparseable document in scoped content group"
+                                );
+                            }
+                        }
+                    }
+                }
+
+                if !parsed_docs.is_empty() {
+                    all_groups.push((hash_str, parsed_docs));
+                }
+            }
+        }
+
+        Ok(all_groups)
+    }
+
+    async fn query_distinct_hashes_for_prefix(
+        &self,
+        mount_prefix: &str,
+    ) -> Result<Vec<String>, StorageError> {
+        let mut filter = doc! {
+            "fingerprint.cryptographic_hash": {
+                "$ne": Bson::Null,
+                "$exists": true
+            }
+        };
+        apply_mount_prefix_filter(&mut filter, Some(mount_prefix));
+
+        let bson_values = self
+            .collection
+            .distinct("fingerprint.cryptographic_hash", filter)
+            .await
+            .map_err(|e| StorageError::QueryFailed {
+                collection: self.config.collection_name.clone(),
+                message: format!("Failed querying distinct hashes for prefix: {}", e),
+            })?;
+
+        let hashes = bson_values
+            .into_iter()
+            .filter_map(|b| match b {
+                Bson::String(s) if !s.is_empty() => Some(s),
+                _ => None,
+            })
+            .collect();
+
+        Ok(hashes)
+    }
+
     async fn query_canonical_masters(&self) -> Result<Vec<MediaMetadataDocument>, StorageError> {
         let filter = doc! {
             "dedup.status": DeduplicationStatus::CanonicalMaster.to_string()

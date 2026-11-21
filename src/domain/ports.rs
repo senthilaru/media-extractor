@@ -239,6 +239,38 @@ pub trait MetadataStorageSink: Send + Sync {
         mount_prefix: Option<&str>,
     ) -> Result<Vec<(String, Vec<MediaMetadataDocument>)>, StorageError>;
 
+    /// Queries content groups for specific cryptographic hashes across the database.
+    async fn query_content_groups_for_hashes(
+        &self,
+        hashes: &[String],
+    ) -> Result<Vec<(String, Vec<MediaMetadataDocument>)>, StorageError> {
+        let all = self.query_all_content_groups(None).await?;
+        let hash_set: std::collections::HashSet<&str> =
+            hashes.iter().map(|s| s.as_str()).collect();
+        Ok(all
+            .into_iter()
+            .filter(|(h, _)| hash_set.contains(h.as_str()))
+            .collect())
+    }
+
+    /// Queries distinct cryptographic hashes for all documents whose file path matches the given mount prefix.
+    async fn query_distinct_hashes_for_prefix(
+        &self,
+        mount_prefix: &str,
+    ) -> Result<Vec<String>, StorageError> {
+        let all = self.query_all_content_groups(None).await?;
+        let mut hashes = std::collections::HashSet::new();
+        for (hash, docs) in all {
+            if docs
+                .iter()
+                .any(|d| d.file_context.file_path.to_string_lossy().starts_with(mount_prefix))
+            {
+                hashes.insert(hash);
+            }
+        }
+        Ok(hashes.into_iter().collect())
+    }
+
     /// Queries all authoritative canonical master documents currently stored in the database.
     async fn query_canonical_masters(&self) -> Result<Vec<MediaMetadataDocument>, StorageError>;
 

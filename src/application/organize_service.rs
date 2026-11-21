@@ -44,6 +44,8 @@ pub struct OrganizePipelineOptions {
     pub keep_source_dir: bool,
     /// Require canonical master drive to be mounted and verified on disk before deletion (defaults to false: verifies against database catalog when drive is offline)
     pub require_master_disk: bool,
+    /// Force full catalog re-audit across all assets instead of scoped source audit
+    pub recheck_all: bool,
 }
 
 impl Default for OrganizePipelineOptions {
@@ -61,6 +63,7 @@ impl Default for OrganizePipelineOptions {
             quiet: false,
             keep_source_dir: false,
             require_master_disk: false,
+            recheck_all: false,
         }
     }
 }
@@ -205,17 +208,27 @@ impl OrganizePipelineService {
         };
 
         // =========================================================================
-        // STAGE 2: Universal Deduplication & Replica Audit
+        // STAGE 2: Deduplication & Replica Audit
         // =========================================================================
-        if !options.quiet {
-            eprintln!("\n>>> Stage [2/5]: Auditing Catalog Duplicates & Replicas...");
-        }
         let stage2_start = Instant::now();
-
         let dedup_engine = MediaDeduplicationEngine::new();
-        let dedup_summary = dedup_engine
-            .run_universal_classification(sink.as_ref(), config, options.dry_run)
-            .await?;
+
+        let dedup_summary = if let (Some(ref source), false) = (&cleaned_source, options.recheck_all) {
+            if !options.quiet {
+                eprintln!("\n>>> Stage [2/5]: Auditing Catalog Duplicates & Replicas (Scoped to Source)...");
+            }
+            let source_str = source.to_string_lossy();
+            dedup_engine
+                .run_scoped_classification(sink.as_ref(), config, &source_str, options.dry_run)
+                .await?
+        } else {
+            if !options.quiet {
+                eprintln!("\n>>> Stage [2/5]: Auditing Catalog Duplicates & Replicas (Full Universal)...");
+            }
+            dedup_engine
+                .run_universal_classification(sink.as_ref(), config, options.dry_run)
+                .await?
+        };
 
         stage_durations.push((
             "Deduplication & Audit".to_string(),

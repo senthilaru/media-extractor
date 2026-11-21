@@ -451,6 +451,7 @@ async fn test_vob_and_dvd_metadata_ingestion_replication_and_pruning() {
         quiet: true,
         keep_source_dir: false,
         require_master_disk: false,
+        recheck_all: false,
     };
 
     // 2. Execute end-to-end organize pipeline
@@ -565,6 +566,7 @@ async fn test_video_ts_root_ingestion_and_co_location() {
         quiet: true,
         keep_source_dir: false,
         require_master_disk: false,
+        recheck_all: false,
     };
 
     let report = service
