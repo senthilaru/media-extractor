@@ -704,3 +704,191 @@ async fn test_master_replication_state_lifecycle_pending_to_replicated() {
     assert!(rep_state2.replicated_drives.contains(&"rep2".to_string()));
     assert!(rep_state2.pending_drives.is_empty());
 }
+
+#[tokio::test]
+async fn test_replica_sync_multi_volume_pool_presence_and_spillover() {
+    use metadata_extractor::infrastructure::disk_probe::MockDiskSpaceProbe;
+
+    let temp_root = tempdir().unwrap();
+    let primary_mount = temp_root.path().join("primary");
+    let primary_master = primary_mount.join("SPSA").join("media").join("master");
+
+    let rep1_vol1_mount = temp_root.path().join("rep1_vol1");
+    let rep1_vol1_master = rep1_vol1_mount.join("SPSA").join("media").join("master");
+
+    let rep1_vol2_mount = temp_root.path().join("rep1_vol2");
+    let rep1_vol2_master = rep1_vol2_mount.join("SPSA").join("media").join("master");
+
+    std::fs::create_dir_all(&primary_master).unwrap();
+    std::fs::create_dir_all(&rep1_vol1_master).unwrap();
+    std::fs::create_dir_all(&rep1_vol2_master).unwrap();
+
+    let mut groups = HashMap::new();
+    groups.insert(
+        "primary".to_string(),
+        DriveGroupSpec {
+            priority: 100,
+            description: Some("Primary".to_string()),
+        },
+    );
+    groups.insert(
+        "replica1".to_string(),
+        DriveGroupSpec {
+            priority: 80,
+            description: Some("Replica 1 Pool".to_string()),
+        },
+    );
+
+    let config = DriveConfiguration {
+        version: "1.0".to_string(),
+        groups,
+        drives: vec![
+            DriveDefinition {
+                id: "primary".to_string(),
+                mount_path: primary_mount.clone(),
+                master_path: primary_master.clone(),
+                group: "primary".to_string(),
+            },
+            DriveDefinition {
+                id: "rep1_vol1".to_string(),
+                mount_path: rep1_vol1_mount.clone(),
+                master_path: rep1_vol1_master.clone(),
+                group: "replica1".to_string(),
+            },
+            DriveDefinition {
+                id: "rep1_vol2".to_string(),
+                mount_path: rep1_vol2_mount.clone(),
+                master_path: rep1_vol2_master.clone(),
+                group: "replica1".to_string(),
+            },
+        ],
+        rules: DriveRules::default(),
+    };
+
+    // Case 1: Master file 1 needs replication. rep1_vol1 is full (1 MB < 5 GB buffer), rep1_vol2 has space.
+    let m1_dir = primary_master.join("2026").join("01-Jan-2026").join("Photos");
+    std::fs::create_dir_all(&m1_dir).unwrap();
+    let m1_file = m1_dir.join("file1.jpg");
+    std::fs::write(&m1_file, b"content of master file 1").unwrap();
+
+    let m1_doc = MediaMetadataDocument {
+        id: Uuid::new_v4(),
+        file_context: FileContext {
+            scanned_root: primary_master.clone(),
+            file_path: m1_file.clone(),
+            relative_path: PathBuf::from("2026/01-Jan-2026/Photos/file1.jpg"),
+            file_name: "file1.jpg".to_string(),
+            file_size_bytes: 24,
+            extension: "jpg".to_string(),
+            media_category: MediaCategory::Photo,
+            modified_at: Some(Utc::now()),
+        },
+        temporal: TemporalMetadata::from_utc_datetime(
+            chrono::DateTime::from_timestamp(1767225600, 0).unwrap(), // 2026-01-01
+            TimestampSource::ExifDateTimeOriginal,
+        ),
+        camera: None,
+        exposure: None,
+        location: None,
+        dimensions: None,
+        video: None,
+        fingerprint: None,
+        extraction_status: Default::default(),
+        dedup: Some(DeduplicationMetadata {
+            cluster_id: Uuid::new_v4(),
+            status: DeduplicationStatus::CanonicalMaster,
+            canonical_master_id: None,
+            canonical_master_path: Some(m1_file.clone()),
+            drive_id: Some("primary".to_string()),
+            drive_group: Some("primary".to_string()),
+            is_in_master_path: true,
+            reclaimable_bytes: 0,
+            evaluated_at: Utc::now(),
+            replication: None,
+        }),
+    };
+
+    // Case 2: Master file 2 is ALREADY present on rep1_vol1
+    let m2_dir = primary_master.join("2026").join("01-Jan-2026").join("Photos");
+    let m2_file = m2_dir.join("file2.jpg");
+    std::fs::write(&m2_file, b"content of master file 2").unwrap();
+
+    let rep_m2_dir = rep1_vol1_master.join("2026").join("01-Jan-2026").join("Photos");
+    std::fs::create_dir_all(&rep_m2_dir).unwrap();
+    let rep_m2_file = rep_m2_dir.join("file2.jpg");
+    std::fs::write(&rep_m2_file, b"content of master file 2").unwrap();
+
+    let m2_doc = MediaMetadataDocument {
+        id: Uuid::new_v4(),
+        file_context: FileContext {
+            scanned_root: primary_master.clone(),
+            file_path: m2_file.clone(),
+            relative_path: PathBuf::from("2026/01-Jan-2026/Photos/file2.jpg"),
+            file_name: "file2.jpg".to_string(),
+            file_size_bytes: 24,
+            extension: "jpg".to_string(),
+            media_category: MediaCategory::Photo,
+            modified_at: Some(Utc::now()),
+        },
+        temporal: TemporalMetadata::from_utc_datetime(
+            chrono::DateTime::from_timestamp(1767225600, 0).unwrap(), // 2026-01-01
+            TimestampSource::ExifDateTimeOriginal,
+        ),
+        camera: None,
+        exposure: None,
+        location: None,
+        dimensions: None,
+        video: None,
+        fingerprint: None,
+        extraction_status: Default::default(),
+        dedup: Some(DeduplicationMetadata {
+            cluster_id: Uuid::new_v4(),
+            status: DeduplicationStatus::CanonicalMaster,
+            canonical_master_id: None,
+            canonical_master_path: Some(m2_file.clone()),
+            drive_id: Some("primary".to_string()),
+            drive_group: Some("primary".to_string()),
+            is_in_master_path: true,
+            reclaimable_bytes: 0,
+            evaluated_at: Utc::now(),
+            replication: None,
+        }),
+    };
+
+    let sink = MockReplicaStorageSink::default();
+    sink.save_batch(&[m1_doc.clone(), m2_doc.clone()]).await.unwrap();
+
+    // Setup mock probe: rep1_vol1 has only 1 MB, rep1_vol2 has 50 GB
+    let probe = Arc::new(MockDiskSpaceProbe::new());
+    probe.set_available_space(&rep1_vol1_mount, 1024 * 1024);
+    probe.set_available_space(&rep1_vol2_mount, 50 * 1024 * 1024 * 1024);
+
+    let service = ReplicaSyncService::new()
+        .with_probe(probe)
+        .with_min_free_space_buffer(5 * 1024 * 1024 * 1024);
+
+    let options = ReplicaSyncOptions {
+        target_replica_id: None,
+        primary_drive_id: None,
+        dry_run: false,
+        verify_hash: true,
+        buffer_config: Default::default(),
+    };
+
+    let plan = service.compile_plan(&sink, &config, &options).await.unwrap();
+
+    // Verify:
+    // file2 is skipped because it is already present in replica1 pool (on rep1_vol1).
+    // file1 must be planned and spilled over to rep1_vol2!
+    assert_eq!(plan.tasks.len(), 1, "Expected exactly 1 task for file1 (file2 is already on rep1_vol1)");
+    assert_eq!(plan.tasks[0].replica_drive_id, "rep1_vol2");
+    assert!(plan.tasks[0].target_path.starts_with(&rep1_vol2_master));
+
+    // Execute replication
+    let report = service.execute_sync_plan(&sink, &config, plan, options).await.unwrap();
+    assert_eq!(report.files_replicated, 1);
+
+    // Verify replicated file on rep1_vol2 exists
+    let expected_dest = rep1_vol2_master.join("2026").join("01-Jan-2026").join("Photos").join("file1.jpg");
+    assert!(expected_dest.exists(), "Replicated file should exist on rep1_vol2");
+}

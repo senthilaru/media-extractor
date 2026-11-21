@@ -136,6 +136,13 @@ pub enum DeduplicationError {
         available_bytes: u64,
     },
 
+    #[error("Storage pool '{pool}' is exhausted: required {required_bytes} bytes, maximum available on any volume is {available_bytes} bytes")]
+    StoragePoolExhausted {
+        pool: String,
+        required_bytes: u64,
+        available_bytes: u64,
+    },
+
     #[error("Pruning is strictly forbidden on protected archive storage '{drive}' at '{path}': {reason}")]
     PruneForbiddenOnProtectedArchive {
         drive: String,

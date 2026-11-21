@@ -160,7 +160,7 @@ fn test_drives_example_yaml_loads_cleanly() {
     assert_eq!(config.groups["replica2"].priority, 70);
     assert_eq!(config.groups["staging"].priority, 20);
 
-    assert_eq!(config.drives.len(), 4);
+    assert_eq!(config.drives.len(), 6);
     let primary = config
         .drives
         .iter()
@@ -172,6 +172,14 @@ fn test_drives_example_yaml_loads_cleanly() {
         primary.master_path,
         Path::new("/Volumes/DummyPrimary-1/SPSA/media/master")
     );
+
+    let primary_ext = config
+        .drives
+        .iter()
+        .find(|d| d.id == "primary_ext_1")
+        .unwrap();
+    assert_eq!(primary_ext.group, "primary");
+    assert_eq!(primary_ext.mount_path, Path::new("/Volumes/DummyPrimary-2"));
 }
 
 #[test]

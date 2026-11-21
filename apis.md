@@ -739,16 +739,25 @@ Drive configurations can be supplied either via a structured YAML/TOML file (`dr
 
 #### 1. Direct Configuration via `.env`
 
-You can declare drive mount points directly in `.env`:
+You can declare drive mount points directly in `.env`, including multi-volume storage pools:
 
 ```bash
-# Primary Master Drive (Priority 100)
+# Primary Master Base Drive (Priority 100)
 DRIVE_PRIMARY_MOUNT=/Volumes/SP-1
 DRIVE_PRIMARY_MASTER=/Volumes/SP-1/SPSA/media/master
 
-# Replica Drives (Priority 80, 70, ...)
+# Primary Storage Extension Pool (Spillover when base reaches 5GB safety threshold)
+DRIVE_PRIMARY_EXT1_MOUNT=/Volumes/SP-1-Ext
+DRIVE_PRIMARY_EXT1_MASTER=/Volumes/SP-1-Ext/SPSA/media/master
+
+# Replica Base Drives (Priority 80, 70, ...)
 DRIVE_REPLICA1_MOUNT=/Volumes/SP-2
 DRIVE_REPLICA1_MASTER=/Volumes/SP-2/SPSA/media/master
+
+# Replica Extension Pool
+DRIVE_REPLICA1_EXT1_MOUNT=/Volumes/SP-2-Ext
+DRIVE_REPLICA1_EXT1_MASTER=/Volumes/SP-2-Ext/SPSA/media/master
+
 DRIVE_REPLICA2_MOUNT=/Volumes/SP-3
 DRIVE_REPLICA2_MASTER=/Volumes/SP-3/SPSA/media/master
 ```
@@ -782,10 +791,22 @@ drives:
     mount_path: "${DRIVE_PRIMARY_MOUNT:-/Volumes/SP-1}"
     master_path: "${DRIVE_PRIMARY_MASTER:-/Volumes/SP-1/SPSA/media/master}"
 
+  # Multi-volume primary pool extension
+  - id: "primary_ext_1"
+    group: "primary"
+    mount_path: "${DRIVE_PRIMARY_EXT1_MOUNT:-/Volumes/SP-1-Ext}"
+    master_path: "${DRIVE_PRIMARY_EXT1_MASTER:-/Volumes/SP-1-Ext/SPSA/media/master}"
+
   - id: "replica_main"
     group: "replica1"
     mount_path: "${DRIVE_REPLICA1_MOUNT:-/Volumes/SP-2}"
     master_path: "${DRIVE_REPLICA1_MASTER:-/Volumes/SP-2/SPSA/media/master}"
+
+  # Multi-volume replica pool extension
+  - id: "replica_1_ext_1"
+    group: "replica1"
+    mount_path: "${DRIVE_REPLICA1_EXT1_MOUNT:-/Volumes/SP-2-Ext}"
+    master_path: "${DRIVE_REPLICA1_EXT1_MASTER:-/Volumes/SP-2-Ext/SPSA/media/master}"
 
   - id: "ext_drive_3"
     group: "staging"

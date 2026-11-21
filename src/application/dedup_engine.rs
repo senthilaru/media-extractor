@@ -399,8 +399,19 @@ impl MediaDeduplicationEngine {
             .filter(|c| matcher.is_primary_master(&c.doc.file_context.file_path))
             .collect();
 
-        // If there are multiple copies in the primary canonical master path: ConflictReview
-        if primary_master_candidates.len() > 1 {
+        let get_drive_index = |drive_id: Option<&str>| -> usize {
+            drive_id
+                .and_then(|id| matcher.config().drives.iter().position(|d| d.id == id))
+                .unwrap_or(usize::MAX)
+        };
+
+        // If there are multiple copies on the SAME primary drive: true intra-drive conflict -> ConflictReview
+        let mut seen_primary_drives = std::collections::HashSet::new();
+        let has_intra_drive_conflict = primary_master_candidates
+            .iter()
+            .any(|c| !seen_primary_drives.insert(c.drive_id.as_deref()));
+
+        if has_intra_drive_conflict {
             return contexts
                 .iter()
                 .map(|c| {
@@ -423,9 +434,16 @@ impl MediaDeduplicationEngine {
                 .collect();
         }
 
-        // Case A: Exactly one copy exists in the Primary Master path -> CanonicalMaster!
-        if primary_master_candidates.len() == 1 {
-            let canonical_master_ctx = primary_master_candidates[0];
+        // Case A: At least one copy exists in the Primary Master pool -> CanonicalMaster!
+        if !primary_master_candidates.is_empty() {
+            let mut sorted_primary_candidates = primary_master_candidates;
+            sorted_primary_candidates.sort_by(|a, b| {
+                let idx_a = get_drive_index(a.drive_id.as_deref());
+                let idx_b = get_drive_index(b.drive_id.as_deref());
+                idx_a.cmp(&idx_b).then_with(|| a.doc.id.cmp(&b.doc.id))
+            });
+
+            let canonical_master_ctx = sorted_primary_candidates[0];
             let canonical_master_id = canonical_master_ctx.doc.id;
             let canonical_master_path = canonical_master_ctx.doc.file_context.file_path.clone();
 
@@ -443,6 +461,37 @@ impl MediaDeduplicationEngine {
 
             let superior_id = superior_external.map(|s| s.doc.id);
 
+            // Enforce single copy per replica group across all replica pool volumes
+            let mut chosen_replica_by_group: std::collections::HashMap<String, Uuid> =
+                std::collections::HashMap::new();
+
+            let mut eligible_replicas: Vec<&DocContext> = contexts
+                .iter()
+                .filter(|c| {
+                    c.is_in_master
+                        && c.doc.id != canonical_master_id
+                        && c.drive_group
+                            .as_deref()
+                            .map(|g| !g.eq_ignore_ascii_case("primary"))
+                            .unwrap_or(false)
+                        && c.quality_rank
+                            .content_quality_cmp(&canonical_master_ctx.quality_rank)
+                            != std::cmp::Ordering::Less
+                })
+                .collect();
+
+            eligible_replicas.sort_by(|a, b| {
+                let idx_a = get_drive_index(a.drive_id.as_deref());
+                let idx_b = get_drive_index(b.drive_id.as_deref());
+                idx_a.cmp(&idx_b).then_with(|| a.doc.id.cmp(&b.doc.id))
+            });
+
+            for rep in eligible_replicas {
+                if let Some(ref group) = rep.drive_group {
+                    chosen_replica_by_group.entry(group.clone()).or_insert(rep.doc.id);
+                }
+            }
+
             return contexts
                 .iter()
                 .map(|c| {
@@ -451,12 +500,12 @@ impl MediaDeduplicationEngine {
                         DeduplicationStatus::NeedsIngestToMaster
                     } else if c.doc.id == canonical_master_id {
                         DeduplicationStatus::CanonicalMaster
-                    } else if c.is_in_master
-                        && c.quality_rank
-                            .content_quality_cmp(&canonical_master_ctx.quality_rank)
-                            != std::cmp::Ordering::Less
-                    {
-                        DeduplicationStatus::ReplicaKeep
+                    } else if let Some(ref group) = c.drive_group {
+                        if chosen_replica_by_group.get(group) == Some(&c.doc.id) {
+                            DeduplicationStatus::ReplicaKeep
+                        } else {
+                            DeduplicationStatus::MarkForRemoval
+                        }
                     } else {
                         // Lower-resolution, smaller, or redundant duplicate -> mark for deletion
                         DeduplicationStatus::MarkForRemoval
@@ -507,17 +556,48 @@ impl MediaDeduplicationEngine {
         let best_candidate_ctx = sorted_contexts[0];
         let best_candidate_id = best_candidate_ctx.doc.id;
 
+        // Enforce single copy per replica group across all replica pool volumes in Case B
+        let mut chosen_replica_by_group: std::collections::HashMap<String, Uuid> =
+            std::collections::HashMap::new();
+
+        let mut eligible_replicas: Vec<&DocContext> = contexts
+            .iter()
+            .filter(|c| {
+                c.is_in_master
+                    && c.doc.id != best_candidate_id
+                    && c.drive_group
+                        .as_deref()
+                        .map(|g| !g.eq_ignore_ascii_case("primary"))
+                        .unwrap_or(false)
+                    && c.quality_rank
+                        .content_quality_cmp(&best_candidate_ctx.quality_rank)
+                        != std::cmp::Ordering::Less
+            })
+            .collect();
+
+        eligible_replicas.sort_by(|a, b| {
+            let idx_a = get_drive_index(a.drive_id.as_deref());
+            let idx_b = get_drive_index(b.drive_id.as_deref());
+            idx_a.cmp(&idx_b).then_with(|| a.doc.id.cmp(&b.doc.id))
+        });
+
+        for rep in eligible_replicas {
+            if let Some(ref group) = rep.drive_group {
+                chosen_replica_by_group.entry(group.clone()).or_insert(rep.doc.id);
+            }
+        }
+
         contexts
             .iter()
             .map(|c| {
                 let status = if c.doc.id == best_candidate_id {
                     DeduplicationStatus::NeedsIngestToMaster
-                } else if c.is_in_master
-                    && c.quality_rank
-                        .content_quality_cmp(&best_candidate_ctx.quality_rank)
-                        != std::cmp::Ordering::Less
-                {
-                    DeduplicationStatus::ReplicaKeep
+                } else if let Some(ref group) = c.drive_group {
+                    if chosen_replica_by_group.get(group) == Some(&c.doc.id) {
+                        DeduplicationStatus::ReplicaKeep
+                    } else {
+                        DeduplicationStatus::MarkForRemoval
+                    }
                 } else {
                     DeduplicationStatus::MarkForRemoval
                 };

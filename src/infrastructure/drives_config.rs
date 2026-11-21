@@ -162,6 +162,36 @@ impl DrivesConfigLoader {
             master_path: primary_master_path,
         }];
 
+        // Scan for primary extension drives 1 through 10
+        for n in 1..=10 {
+            let ext_key = format!("DRIVE_PRIMARY_EXT{}_MOUNT", n);
+            let ext_alt_key = format!("PRIMARY_EXT{}_MOUNT_PATH", n);
+            if let Ok(mount_str) =
+                std::env::var(&ext_key).or_else(|_| std::env::var(&ext_alt_key))
+            {
+                let trimmed = mount_str.trim();
+                if !trimmed.is_empty() {
+                    let mount_path = PathBuf::from(trimmed);
+                    let master_key = format!("DRIVE_PRIMARY_EXT{}_MASTER", n);
+                    let master_alt_key = format!("PRIMARY_EXT{}_MASTER_PATH", n);
+                    let master_path = std::env::var(&master_key)
+                        .or_else(|_| std::env::var(&master_alt_key))
+                        .map(|s| PathBuf::from(s.trim()))
+                        .unwrap_or_else(|_| Self::resolve_default_master_path(&mount_path));
+
+                    let drive_id = std::env::var(format!("DRIVE_PRIMARY_EXT{}_ID", n))
+                        .unwrap_or_else(|_| format!("primary_ext_{}", n));
+
+                    drives.push(DriveDefinition {
+                        id: drive_id,
+                        group: "primary".to_string(),
+                        mount_path,
+                        master_path,
+                    });
+                }
+            }
+        }
+
         // Scan for replicas 1 through 10
         for n in 1..=10 {
             let replica_key = format!("DRIVE_REPLICA{}_MOUNT", n);
@@ -194,10 +224,43 @@ impl DrivesConfigLoader {
 
                     drives.push(DriveDefinition {
                         id: drive_id,
-                        group: group_name,
+                        group: group_name.clone(),
                         mount_path,
                         master_path,
                     });
+
+                    // Scan for replica extension drives 1 through 10
+                    for m in 1..=10 {
+                        let rep_ext_key = format!("DRIVE_REPLICA{}_EXT{}_MOUNT", n, m);
+                        let rep_ext_alt_key = format!("REPLICA{}_EXT{}_MOUNT_PATH", n, m);
+                        if let Ok(ext_mount_str) =
+                            std::env::var(&rep_ext_key).or_else(|_| std::env::var(&rep_ext_alt_key))
+                        {
+                            let ext_trimmed = ext_mount_str.trim();
+                            if !ext_trimmed.is_empty() {
+                                let ext_mount_path = PathBuf::from(ext_trimmed);
+                                let rep_master_key = format!("DRIVE_REPLICA{}_EXT{}_MASTER", n, m);
+                                let rep_master_alt = format!("REPLICA{}_EXT{}_MASTER_PATH", n, m);
+                                let ext_master_path = std::env::var(&rep_master_key)
+                                    .or_else(|_| std::env::var(&rep_master_alt))
+                                    .map(|s| PathBuf::from(s.trim()))
+                                    .unwrap_or_else(|_| {
+                                        Self::resolve_default_master_path(&ext_mount_path)
+                                    });
+
+                                let ext_drive_id =
+                                    std::env::var(format!("DRIVE_REPLICA{}_EXT{}_ID", n, m))
+                                        .unwrap_or_else(|_| format!("replica_{}_ext_{}", n, m));
+
+                                drives.push(DriveDefinition {
+                                    id: ext_drive_id,
+                                    group: group_name.clone(),
+                                    mount_path: ext_mount_path,
+                                    master_path: ext_master_path,
+                                });
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -458,5 +521,84 @@ impl CanonicalPathMatcher {
             .and_then(|d| self.config.groups.get(&d.group))
             .map(|g| g.priority)
             .unwrap_or(0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_storage_pool_helpers() {
+        let mut groups = std::collections::HashMap::new();
+        groups.insert(
+            "primary".to_string(),
+            crate::domain::dedup_models::DriveGroupSpec {
+                priority: 100,
+                description: None,
+            },
+        );
+        groups.insert(
+            "replica1".to_string(),
+            crate::domain::dedup_models::DriveGroupSpec {
+                priority: 80,
+                description: None,
+            },
+        );
+
+        let drives = vec![
+            DriveDefinition {
+                id: "primary_main".to_string(),
+                group: "primary".to_string(),
+                mount_path: PathBuf::from("/Volumes/Primary1"),
+                master_path: PathBuf::from("/Volumes/Primary1/SPSA/media/master"),
+            },
+            DriveDefinition {
+                id: "primary_ext_1".to_string(),
+                group: "primary".to_string(),
+                mount_path: PathBuf::from("/Volumes/Primary2"),
+                master_path: PathBuf::from("/Volumes/Primary2/SPSA/media/master"),
+            },
+            DriveDefinition {
+                id: "replica_1".to_string(),
+                group: "replica1".to_string(),
+                mount_path: PathBuf::from("/Volumes/Replica1"),
+                master_path: PathBuf::from("/Volumes/Replica1/SPSA/media/master"),
+            },
+            DriveDefinition {
+                id: "replica_1_ext_1".to_string(),
+                group: "replica1".to_string(),
+                mount_path: PathBuf::from("/Volumes/Replica2"),
+                master_path: PathBuf::from("/Volumes/Replica2/SPSA/media/master"),
+            },
+        ];
+
+        let config = DriveConfiguration {
+            version: "1.0".to_string(),
+            groups,
+            drives,
+            rules: crate::domain::dedup_models::DriveRules::default(),
+        };
+
+        assert_eq!(config.get_primary_pool().len(), 2);
+        assert_eq!(config.get_replica_pool("replica1").len(), 2);
+        assert_eq!(
+            config
+                .find_drive_by_path(Path::new("/Volumes/Primary2/SPSA/media/master/2026/01-Jan-2026/Photos/img.jpg"))
+                .unwrap()
+                .id,
+            "primary_ext_1"
+        );
+
+        let matcher = CanonicalPathMatcher::new(config);
+        assert!(matcher.is_primary_master(Path::new(
+            "/Volumes/Primary1/SPSA/media/master/2026/01-Jan-2026/Photos/img.jpg"
+        )));
+        assert!(matcher.is_primary_master(Path::new(
+            "/Volumes/Primary2/SPSA/media/master/2026/01-Jan-2026/Photos/img.jpg"
+        )));
+        assert!(!matcher.is_primary_master(Path::new(
+            "/Volumes/Replica1/SPSA/media/master/2026/01-Jan-2026/Photos/img.jpg"
+        )));
     }
 }

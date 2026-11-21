@@ -1469,6 +1469,7 @@ dependencies = [
  "indicatif",
  "jwalk",
  "kamadak-exif",
+ "libc",
  "metrics",
  "mongodb",
  "nom-exif",

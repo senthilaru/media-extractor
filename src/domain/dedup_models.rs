@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 use crate::domain::metadata_models::ImageDimensions;
@@ -379,6 +379,51 @@ pub struct DriveConfiguration {
     pub drives: Vec<DriveDefinition>,
     #[serde(default)]
     pub rules: DriveRules,
+}
+
+impl DriveConfiguration {
+    /// Returns all member volumes for a specific group name in declaration order.
+    pub fn get_pool_volumes(&self, group: &str) -> Vec<&DriveDefinition> {
+        self.drives
+            .iter()
+            .filter(|d| d.group.eq_ignore_ascii_case(group))
+            .collect()
+    }
+
+    /// Returns all member volumes belonging to the primary group.
+    pub fn get_primary_pool(&self) -> Vec<&DriveDefinition> {
+        self.get_pool_volumes("primary")
+    }
+
+    /// Returns all member volumes belonging to a replica group.
+    pub fn get_replica_pool(&self, group: &str) -> Vec<&DriveDefinition> {
+        self.get_pool_volumes(group)
+    }
+
+    /// Returns all distinct storage group names defined in this configuration.
+    pub fn get_storage_groups(&self) -> Vec<String> {
+        let mut groups: Vec<String> = self.groups.keys().cloned().collect();
+        for d in &self.drives {
+            if !groups.contains(&d.group) {
+                groups.push(d.group.clone());
+            }
+        }
+        groups.sort_by_key(|g| {
+            self.groups
+                .get(g)
+                .map(|spec| std::cmp::Reverse(spec.priority))
+                .unwrap_or(std::cmp::Reverse(0))
+        });
+        groups
+    }
+
+    /// Finds the drive definition whose `mount_path` is a prefix of the given path.
+    pub fn find_drive_by_path(&self, path: &Path) -> Option<&DriveDefinition> {
+        self.drives
+            .iter()
+            .filter(|d| path.starts_with(&d.mount_path))
+            .max_by_key(|d| d.mount_path.as_os_str().len())
+    }
 }
 
 /// Evaluated lifecycle status of an asset within a duplicate cluster.

@@ -33,10 +33,22 @@ drives:
     mount_path: "${DRIVE_PRIMARY_MOUNT:-/Volumes/DummyPrimary-1}"
     master_path: "${DRIVE_PRIMARY_MASTER:-/Volumes/DummyPrimary-1/SPSA/media/master}"
 
+  # Multi-volume primary extension pool (spillover when primary_main reaches 5GB threshold)
+  - id: "primary_ext_1"
+    group: "primary"
+    mount_path: "${DRIVE_PRIMARY_EXT1_MOUNT:-/Volumes/DummyPrimary-2}"
+    master_path: "${DRIVE_PRIMARY_EXT1_MASTER:-/Volumes/DummyPrimary-2/SPSA/media/master}"
+
   - id: "replica_1"
     group: "replica1"
     mount_path: "${DRIVE_REPLICA1_MOUNT:-/Volumes/DummyReplica-1}"
     master_path: "${DRIVE_REPLICA1_MASTER:-/Volumes/DummyReplica-1/SPSA/media/master}"
+
+  # Multi-volume replica extension pool (spillover for backup replica sets)
+  - id: "replica_1_ext_1"
+    group: "replica1"
+    mount_path: "${DRIVE_REPLICA1_EXT1_MOUNT:-/Volumes/DummyReplica-1-Ext}"
+    master_path: "${DRIVE_REPLICA1_EXT1_MASTER:-/Volumes/DummyReplica-1-Ext/SPSA/media/master}"
 
   - id: "replica_2"
     group: "replica2"

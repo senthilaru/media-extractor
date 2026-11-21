@@ -580,3 +580,194 @@ async fn test_run_database_dedup_dry_run_and_execution() {
         DeduplicationStatus::MarkForRemoval
     );
 }
+
+#[test]
+fn test_multi_volume_primary_pool_single_copy_dedup() {
+    let mut groups = HashMap::new();
+    groups.insert(
+        "primary".to_string(),
+        DriveGroupSpec {
+            priority: 100,
+            description: Some("Primary Pool".to_string()),
+        },
+    );
+
+    let drives = vec![
+        DriveDefinition {
+            id: "primary_vol1".to_string(),
+            group: "primary".to_string(),
+            mount_path: PathBuf::from("/Volumes/Primary1"),
+            master_path: PathBuf::from("/Volumes/Primary1/SPSA/media/master"),
+        },
+        DriveDefinition {
+            id: "primary_vol2".to_string(),
+            group: "primary".to_string(),
+            mount_path: PathBuf::from("/Volumes/Primary2"),
+            master_path: PathBuf::from("/Volumes/Primary2/SPSA/media/master"),
+        },
+    ];
+
+    let config = DriveConfiguration {
+        version: "1.0".to_string(),
+        groups,
+        drives,
+        rules: DriveRules::default(),
+    };
+    let matcher = CanonicalPathMatcher::new(config);
+
+    let doc_vol1 = create_mock_doc(
+        "/Volumes/Primary1/SPSA/media/master/2026/01-Jan-2026/Photos/IMG_POOL.JPG",
+        15_000_000,
+        "hash_pool_123",
+    );
+    let doc_vol2 = create_mock_doc(
+        "/Volumes/Primary2/SPSA/media/master/2026/01-Jan-2026/Photos/IMG_POOL.JPG",
+        15_000_000,
+        "hash_pool_123",
+    );
+    let doc_staging = create_mock_doc(
+        "/Volumes/Staging/IMG_POOL.JPG",
+        15_000_000,
+        "hash_pool_123",
+    );
+
+    let cluster = vec![doc_vol1.clone(), doc_vol2.clone(), doc_staging.clone()];
+    let evaluations = MediaDeduplicationEngine::evaluate_replica_cluster(&cluster, &matcher);
+
+    let eval_map: HashMap<Uuid, DeduplicationMetadata> = evaluations.into_iter().collect();
+
+    // Primary vol1 must be chosen as CanonicalMaster
+    let meta_vol1 = eval_map.get(&doc_vol1.id).unwrap();
+    assert_eq!(meta_vol1.status, DeduplicationStatus::CanonicalMaster);
+    assert_eq!(meta_vol1.reclaimable_bytes, 0);
+
+    // Primary vol2 duplicate must be MarkForRemoval to enforce single-copy invariant across primary pool
+    let meta_vol2 = eval_map.get(&doc_vol2.id).unwrap();
+    assert_eq!(meta_vol2.status, DeduplicationStatus::MarkForRemoval);
+    assert_eq!(meta_vol2.canonical_master_id, Some(doc_vol1.id));
+    assert_eq!(meta_vol2.reclaimable_bytes, 15_000_000);
+
+    // Staging duplicate must also be MarkForRemoval
+    let meta_staging = eval_map.get(&doc_staging.id).unwrap();
+    assert_eq!(meta_staging.status, DeduplicationStatus::MarkForRemoval);
+    assert_eq!(meta_staging.canonical_master_id, Some(doc_vol1.id));
+}
+
+#[test]
+fn test_multi_volume_replica_pool_single_copy_dedup() {
+    let mut groups = HashMap::new();
+    groups.insert(
+        "primary".to_string(),
+        DriveGroupSpec {
+            priority: 100,
+            description: Some("Primary Pool".to_string()),
+        },
+    );
+    groups.insert(
+        "replica1".to_string(),
+        DriveGroupSpec {
+            priority: 80,
+            description: Some("Replica 1 Pool".to_string()),
+        },
+    );
+    groups.insert(
+        "replica2".to_string(),
+        DriveGroupSpec {
+            priority: 70,
+            description: Some("Replica 2 Pool".to_string()),
+        },
+    );
+
+    let drives = vec![
+        DriveDefinition {
+            id: "primary_vol1".to_string(),
+            group: "primary".to_string(),
+            mount_path: PathBuf::from("/Volumes/Primary1"),
+            master_path: PathBuf::from("/Volumes/Primary1/SPSA/media/master"),
+        },
+        DriveDefinition {
+            id: "replica_1_vol1".to_string(),
+            group: "replica1".to_string(),
+            mount_path: PathBuf::from("/Volumes/Replica1Vol1"),
+            master_path: PathBuf::from("/Volumes/Replica1Vol1/SPSA/media/master"),
+        },
+        DriveDefinition {
+            id: "replica_1_vol2".to_string(),
+            group: "replica1".to_string(),
+            mount_path: PathBuf::from("/Volumes/Replica1Vol2"),
+            master_path: PathBuf::from("/Volumes/Replica1Vol2/SPSA/media/master"),
+        },
+        DriveDefinition {
+            id: "replica_2_vol1".to_string(),
+            group: "replica2".to_string(),
+            mount_path: PathBuf::from("/Volumes/Replica2Vol1"),
+            master_path: PathBuf::from("/Volumes/Replica2Vol1/SPSA/media/master"),
+        },
+    ];
+
+    let config = DriveConfiguration {
+        version: "1.0".to_string(),
+        groups,
+        drives,
+        rules: DriveRules::default(),
+    };
+    let matcher = CanonicalPathMatcher::new(config);
+
+    let doc_master = create_mock_doc(
+        "/Volumes/Primary1/SPSA/media/master/2026/01-Jan-2026/Photos/IMG_REP.JPG",
+        20_000_000,
+        "hash_rep_456",
+    );
+    let doc_rep1_vol1 = create_mock_doc(
+        "/Volumes/Replica1Vol1/SPSA/media/master/2026/01-Jan-2026/Photos/IMG_REP.JPG",
+        20_000_000,
+        "hash_rep_456",
+    );
+    let doc_rep1_vol2 = create_mock_doc(
+        "/Volumes/Replica1Vol2/SPSA/media/master/2026/01-Jan-2026/Photos/IMG_REP.JPG",
+        20_000_000,
+        "hash_rep_456",
+    );
+    let doc_rep2_vol1 = create_mock_doc(
+        "/Volumes/Replica2Vol1/SPSA/media/master/2026/01-Jan-2026/Photos/IMG_REP.JPG",
+        20_000_000,
+        "hash_rep_456",
+    );
+
+    let cluster = vec![
+        doc_master.clone(),
+        doc_rep1_vol1.clone(),
+        doc_rep1_vol2.clone(),
+        doc_rep2_vol1.clone(),
+    ];
+    let evaluations = MediaDeduplicationEngine::evaluate_replica_cluster(&cluster, &matcher);
+    let eval_map: HashMap<Uuid, DeduplicationMetadata> = evaluations.into_iter().collect();
+
+    // Primary master
+    assert_eq!(
+        eval_map.get(&doc_master.id).unwrap().status,
+        DeduplicationStatus::CanonicalMaster
+    );
+
+    // In replica1, only the first volume replica_1_vol1 is ReplicaKeep
+    assert_eq!(
+        eval_map.get(&doc_rep1_vol1.id).unwrap().status,
+        DeduplicationStatus::ReplicaKeep
+    );
+
+    // Intra-replica duplicate in replica_1_vol2 must be MarkForRemoval
+    assert_eq!(
+        eval_map.get(&doc_rep1_vol2.id).unwrap().status,
+        DeduplicationStatus::MarkForRemoval
+    );
+    assert_eq!(
+        eval_map.get(&doc_rep1_vol2.id).unwrap().reclaimable_bytes,
+        20_000_000
+    );
+
+    // Distinct replica2 group gets its own single copy ReplicaKeep
+    assert_eq!(
+        eval_map.get(&doc_rep2_vol1.id).unwrap().status,
+        DeduplicationStatus::ReplicaKeep
+    );
+}

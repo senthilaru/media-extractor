@@ -2,6 +2,7 @@ pub mod archive_guard;
 pub mod blake3_hasher;
 pub mod classifier;
 pub mod cycle_detector;
+pub mod disk_probe;
 pub mod drive_spindle_lock;
 pub mod drives_config;
 pub mod exif_parser;
@@ -14,5 +15,6 @@ pub mod terminal_progress;
 pub mod video_parser;
 pub mod walker;
 
+pub use disk_probe::{DiskSpaceProbe, MockDiskSpaceProbe, PosixDiskSpaceProbe};
 pub use drive_spindle_lock::{DriveSpindleLockManager, SpindleTransferGuard};
 pub use terminal_progress::IndicatifTerminalProgress;

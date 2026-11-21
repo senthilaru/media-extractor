@@ -75,6 +75,12 @@ Re-connect Drives 1-by-1 <────────── Reclaim Terabytes of Di
      ./target/release/metadata-extractor dedup prune --drive wd_backup -c drives.yaml --execute
      ```
 
+   - **Multi-Volume Storage Extension Pools & Capacity Spillover**:
+     When external hard drives reach capacity, configure additional primary or replica drives under the same group (`group: "primary"`, `group: "replica1"`).
+     - **Single-Copy Invariant**: Only exactly ONE copy of an asset is kept across member volumes of a pool. Redundant intra-pool duplicates are automatically marked `MarkForRemoval`.
+     - **Capacity Spillover**: During ingestion or replica sync, when a base volume reaches the 5 GB safety threshold, newly ingested assets automatically spill over into the next extension drive in the pool seamlessly.
+     - **Comprehensive Protection**: Pruning operations strictly protect all member volumes across all pools.
+
    - **All-in-One End-to-End Organize Pipeline (`organize`)**:
      To run scan, duplicate audit, master ingest, replica replication, and pruning in a single unified command:
      ```bash
@@ -290,8 +296,15 @@ MONGODB_COLLECTION=media_assets
 # Copy drives.example.yaml to drives.yaml OR define drive mount paths directly here:
 DRIVE_PRIMARY_MOUNT=/Volumes/SP-1
 DRIVE_PRIMARY_MASTER=/Volumes/SP-1/SPSA/media/master
+# Multi-Volume Storage Pools: Automatically spill over when DRIVE_PRIMARY reaches 5GB safety buffer:
+DRIVE_PRIMARY_EXT1_MOUNT=/Volumes/SP-1-Ext
+DRIVE_PRIMARY_EXT1_MASTER=/Volumes/SP-1-Ext/SPSA/media/master
+
 DRIVE_REPLICA1_MOUNT=/Volumes/SP-2
 DRIVE_REPLICA1_MASTER=/Volumes/SP-2/SPSA/media/master
+# Multi-Volume Replica Pools: Expand replica backup targets seamlessly:
+DRIVE_REPLICA1_EXT1_MOUNT=/Volumes/SP-2-Ext
+DRIVE_REPLICA1_EXT1_MASTER=/Volumes/SP-2-Ext/SPSA/media/master
 ```
 
 When `.env` is present, you can simply run:

@@ -2,6 +2,8 @@ use chrono::Utc;
 use std::collections::HashSet;
 use std::io::IsTerminal;
 use std::time::Instant;
+use std::path::PathBuf;
+use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::application::drive_pruner::DrivePruningService;
@@ -15,7 +17,12 @@ use crate::domain::errors::DeduplicationError;
 use crate::domain::metadata_models::{FileContext, MediaMetadataDocument};
 use crate::domain::ports::MetadataStorageSink;
 use crate::infrastructure::blake3_hasher::Blake3MediaHasher;
+use crate::infrastructure::disk_probe::{DiskSpaceProbe, PosixDiskSpaceProbe};
 use crate::infrastructure::drive_spindle_lock::DriveSpindleLockManager;
+use crate::infrastructure::drives_config::CanonicalPathMatcher;
+
+/// Default minimum free-space safety buffer on replica storage pool volumes (5 GB).
+pub const DEFAULT_MIN_FREE_SPACE_BUFFER_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 
 /// Runtime options for a replica synchronization run.
 #[derive(Debug, Clone)]
@@ -41,9 +48,21 @@ impl Default for ReplicaSyncOptions {
 
 /// Service orchestrating fanout replication of CanonicalMaster media assets
 /// to all configured and mounted replica drives.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub struct ReplicaSyncService {
     spindle_locks: DriveSpindleLockManager,
+    disk_probe: Arc<dyn DiskSpaceProbe>,
+    min_free_space_buffer: u64,
+}
+
+impl Default for ReplicaSyncService {
+    fn default() -> Self {
+        Self {
+            spindle_locks: DriveSpindleLockManager::default(),
+            disk_probe: Arc::new(PosixDiskSpaceProbe::new()),
+            min_free_space_buffer: DEFAULT_MIN_FREE_SPACE_BUFFER_BYTES,
+        }
+    }
 }
 
 impl ReplicaSyncService {
@@ -52,7 +71,76 @@ impl ReplicaSyncService {
     }
 
     pub fn with_spindle_locks(spindle_locks: DriveSpindleLockManager) -> Self {
-        Self { spindle_locks }
+        Self {
+            spindle_locks,
+            ..Default::default()
+        }
+    }
+
+    pub fn with_probe(mut self, probe: Arc<dyn DiskSpaceProbe>) -> Self {
+        self.disk_probe = probe;
+        self
+    }
+
+    pub fn with_min_free_space_buffer(mut self, buffer_bytes: u64) -> Self {
+        self.min_free_space_buffer = buffer_bytes;
+        self
+    }
+
+    /// Checks if a canonical master is already mirrored on ANY mounted volume of the replica pool on disk.
+    pub fn is_replicated_in_pool(
+        master_doc: &MediaMetadataDocument,
+        replica_volumes: &[&DriveDefinition],
+    ) -> Option<PathBuf> {
+        let mut rel_paths = Vec::new();
+
+        // 1. If file_path has canonical components <Year>/<DateFolder>/<Category>/<filename>, extract relative path
+        let components: Vec<_> = master_doc
+            .file_context
+            .file_path
+            .components()
+            .map(|c| c.as_os_str())
+            .collect();
+        if components.len() >= 4 {
+            let len = components.len();
+            let mut rel = PathBuf::new();
+            for c in &components[len - 4..] {
+                rel.push(c);
+            }
+            rel_paths.push(rel);
+        }
+
+        // 2. Fallback to build_canonical_relative_path from metadata
+        let (year, month, day) = if master_doc.temporal.year > 0 {
+            (
+                master_doc.temporal.year,
+                master_doc.temporal.month,
+                master_doc.temporal.day,
+            )
+        } else if let Some(mtime) = master_doc.file_context.modified_at {
+            use chrono::Datelike;
+            (mtime.year(), mtime.month(), mtime.day())
+        } else {
+            (2026, 1, 1)
+        };
+
+        rel_paths.push(UnifiedFileTransferService::build_canonical_relative_path(
+            year,
+            month,
+            day,
+            master_doc.file_context.media_category,
+            &master_doc.file_context.file_name,
+        ));
+
+        for vol in replica_volumes {
+            for rel in &rel_paths {
+                let candidate_path = vol.master_path.join(rel);
+                if candidate_path.exists() {
+                    return Some(candidate_path);
+                }
+            }
+        }
+        None
     }
 
     /// Resolves primary drive and candidate replica drives from configuration.
@@ -145,33 +233,55 @@ impl ReplicaSyncService {
 
         let mut active_replica_ids = Vec::new();
         let mut offline_replica_ids = Vec::new();
-        let mut active_replica_drives = Vec::new();
+        let mut replica_groups: Vec<(String, Vec<&DriveDefinition>)> = Vec::new();
 
         for &rep in &replica_drives {
             if rep.mount_path.exists() {
                 active_replica_ids.push(rep.id.clone());
-                active_replica_drives.push(rep);
+                if let Some(entry) = replica_groups.iter_mut().find(|(g, _)| g == &rep.group) {
+                    entry.1.push(rep);
+                } else {
+                    replica_groups.push((rep.group.clone(), vec![rep]));
+                }
             } else {
                 offline_replica_ids.push(rep.id.clone());
             }
         }
 
         let canonical_masters = sink.query_canonical_masters().await?;
+        let matcher = CanonicalPathMatcher::new(config.clone());
         let mut tasks = Vec::new();
         let mut total_bytes = 0u64;
         let hasher = Blake3MediaHasher::new();
 
-        for rep in active_replica_drives {
-            // Query catalog records already present on this replica drive
-            let existing_replicas = sink.query_replica_documents(&rep.id).await?;
-            let existing_hashes: HashSet<String> = existing_replicas
-                .iter()
-                .filter_map(|d| d.fingerprint.as_ref().map(|f| f.cryptographic_hash.clone()))
-                .collect();
-            let existing_master_ids: HashSet<Uuid> = existing_replicas
-                .iter()
-                .filter_map(|d| d.dedup.as_ref().and_then(|meta| meta.canonical_master_id))
-                .collect();
+        for (_group_name, group_volumes) in replica_groups {
+            // Query catalog records already present on ANY volume in this replica group
+            let mut existing_hashes: HashSet<String> = HashSet::new();
+            let mut existing_master_ids: HashSet<Uuid> = HashSet::new();
+            for vol in &group_volumes {
+                let existing_replicas = sink.query_replica_documents(&vol.id).await?;
+                for doc in existing_replicas {
+                    if let Some(ref f) = doc.fingerprint {
+                        existing_hashes.insert(f.cryptographic_hash.clone());
+                    }
+                    if let Some(master_id) =
+                        doc.dedup.as_ref().and_then(|meta| meta.canonical_master_id)
+                    {
+                        existing_master_ids.insert(master_id);
+                    }
+                }
+            }
+
+            // Track volume available space for capacity spillover across volumes in this replica group
+            let mut volume_avail_space: std::collections::HashMap<String, u64> =
+                std::collections::HashMap::new();
+            for vol in &group_volumes {
+                let avail = self
+                    .disk_probe
+                    .available_space_bytes(&vol.mount_path)
+                    .unwrap_or(u64::MAX);
+                volume_avail_space.insert(vol.id.clone(), avail);
+            }
 
             for master in &canonical_masters {
                 let master_hash = master
@@ -186,40 +296,93 @@ impl ReplicaSyncService {
                         .unwrap_or(false);
 
                 if is_already_registered {
-                    continue; // Already replicated and cataloged on this replica drive
+                    continue; // Already replicated and cataloged on this replica group
+                }
+
+                // Also check if the physical file already exists on ANY volume of this replica pool
+                if Self::is_replicated_in_pool(master, &group_volumes).is_some() {
+                    continue;
                 }
 
                 // Derive canonical relative path
-                let rel_path = match master
-                    .file_context
-                    .file_path
-                    .strip_prefix(&primary_drive.master_path)
+                let rel_path = if let Some(drive) =
+                    matcher.find_drive_for_path(&master.file_context.file_path)
                 {
-                    Ok(rel) => rel.to_path_buf(),
-                    Err(_) => {
-                        let (year, month, day) = if master.temporal.year > 0 {
-                            (
-                                master.temporal.year,
-                                master.temporal.month,
-                                master.temporal.day,
+                    master
+                        .file_context
+                        .file_path
+                        .strip_prefix(&drive.master_path)
+                        .map(|p| p.to_path_buf())
+                        .unwrap_or_else(|_| {
+                            let (year, month, day) = if master.temporal.year > 0 {
+                                (
+                                    master.temporal.year,
+                                    master.temporal.month,
+                                    master.temporal.day,
+                                )
+                            } else if let Some(mtime) = master.file_context.modified_at {
+                                use chrono::Datelike;
+                                (mtime.year(), mtime.month(), mtime.day())
+                            } else {
+                                (2026, 1, 1)
+                            };
+                            UnifiedFileTransferService::build_canonical_relative_path(
+                                year,
+                                month,
+                                day,
+                                master.file_context.media_category,
+                                &master.file_context.file_name,
                             )
-                        } else if let Some(mtime) = master.file_context.modified_at {
-                            use chrono::Datelike;
-                            (mtime.year(), mtime.month(), mtime.day())
-                        } else {
-                            (2026, 1, 1)
-                        };
-                        UnifiedFileTransferService::build_canonical_relative_path(
-                            year,
-                            month,
-                            day,
-                            master.file_context.media_category,
-                            &master.file_context.file_name,
+                        })
+                } else {
+                    let (year, month, day) = if master.temporal.year > 0 {
+                        (
+                            master.temporal.year,
+                            master.temporal.month,
+                            master.temporal.day,
                         )
+                    } else if let Some(mtime) = master.file_context.modified_at {
+                        use chrono::Datelike;
+                        (mtime.year(), mtime.month(), mtime.day())
+                    } else {
+                        (2026, 1, 1)
+                    };
+                    UnifiedFileTransferService::build_canonical_relative_path(
+                        year,
+                        month,
+                        day,
+                        master.file_context.media_category,
+                        &master.file_context.file_name,
+                    )
+                };
+
+                // Select target volume in replica group using capacity spillover
+                let target_vol = {
+                    let required = master
+                        .file_context
+                        .file_size_bytes
+                        .saturating_add(self.min_free_space_buffer);
+                    let mut chosen = None;
+                    for vol in &group_volumes {
+                        let avail = volume_avail_space.get(&vol.id).copied().unwrap_or(0);
+                        if avail >= required {
+                            chosen = Some(*vol);
+                            break;
+                        }
+                    }
+                    match chosen {
+                        Some(vol) => {
+                            if let Some(space) = volume_avail_space.get_mut(&vol.id) {
+                                *space =
+                                    space.saturating_sub(master.file_context.file_size_bytes);
+                            }
+                            vol
+                        }
+                        None => group_volumes[0],
                     }
                 };
 
-                let target_path = rep.master_path.join(&rel_path);
+                let target_path = target_vol.master_path.join(&rel_path);
 
                 let resolution = UnifiedFileTransferService::resolve_collision_path(
                     &target_path,
@@ -229,7 +392,9 @@ impl ReplicaSyncService {
                 );
 
                 let (dest_path, status) = match resolution {
-                    PathResolution::IdenticalExists(p) => (p, IngestTaskStatus::SkippedIdentical),
+                    PathResolution::IdenticalExists(p) => {
+                        (p, IngestTaskStatus::SkippedIdentical)
+                    }
                     PathResolution::Available(p) | PathResolution::CollisionResolved(p) => {
                         (p, IngestTaskStatus::Pending)
                     }
@@ -244,8 +409,8 @@ impl ReplicaSyncService {
                     canonical_master_id: master.id,
                     source_path: master.file_context.file_path.clone(),
                     target_path: dest_path,
-                    replica_drive_id: rep.id.clone(),
-                    replica_group: rep.group.clone(),
+                    replica_drive_id: target_vol.id.clone(),
+                    replica_group: target_vol.group.clone(),
                     canonical_rel_path: rel_path,
                     file_size_bytes: master.file_context.file_size_bytes,
                     cryptographic_hash: master_hash,
@@ -607,6 +772,7 @@ impl ReplicaSyncService {
                     });
 
                 rep_state.pending_drives.retain(|d| d != replica_drive_id);
+
                 if !rep_state.replicated_drives.contains(replica_drive_id) {
                     rep_state.replicated_drives.push(replica_drive_id.clone());
                 }

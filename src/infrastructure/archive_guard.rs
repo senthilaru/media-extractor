@@ -32,8 +32,9 @@ impl ArchiveProtectionGuard {
         let mut roots = Vec::new();
 
         for drive in &config.drives {
-            let is_primary = drive.group == "primary";
-            let is_replica = drive.group.starts_with("replica");
+            let is_primary = drive.group.eq_ignore_ascii_case("primary");
+            let is_replica = drive.group.to_lowercase().starts_with("replica")
+                || drive.group.eq_ignore_ascii_case("secondary");
 
             if is_primary || is_replica {
                 roots.push(Self::canonicalize_safe(&drive.master_path));
@@ -145,8 +146,9 @@ impl ArchiveProtectionGuard {
 
     /// Validates a single `DriveDefinition` against archive immutability rules.
     pub fn validate_drive_definition(drive: &DriveDefinition) -> Result<(), DeduplicationError> {
-        let is_primary = drive.group == "primary";
-        let is_replica = drive.group.starts_with("replica");
+        let is_primary = drive.group.eq_ignore_ascii_case("primary");
+        let is_replica = drive.group.to_lowercase().starts_with("replica")
+            || drive.group.eq_ignore_ascii_case("secondary");
 
         if is_primary || is_replica {
             let canonical_mount = Self::canonicalize_safe(&drive.mount_path);

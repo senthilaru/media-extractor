@@ -19,13 +19,30 @@ use crate::domain::ports::{MediaClassifier, MetadataStorageSink};
 use crate::infrastructure::archive_guard::ArchiveProtectionGuard;
 use crate::infrastructure::blake3_hasher::Blake3MediaHasher;
 use crate::infrastructure::drive_spindle_lock::DriveSpindleLockManager;
+use std::sync::Arc;
+use crate::infrastructure::disk_probe::{DiskSpaceProbe, PosixDiskSpaceProbe};
 use crate::infrastructure::drives_config::CanonicalPathMatcher;
+
+/// Default minimum free-space safety buffer on storage pool volumes (5 GB).
+pub const DEFAULT_MIN_FREE_SPACE_BUFFER_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 
 /// Service orchestrating safe, bitwise-verified ingestion of unmastered media assets
 /// into the primary drive's canonical master folder hierarchy.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub struct MasterIngestService {
     spindle_locks: DriveSpindleLockManager,
+    disk_probe: Arc<dyn DiskSpaceProbe>,
+    min_free_space_buffer: u64,
+}
+
+impl Default for MasterIngestService {
+    fn default() -> Self {
+        Self {
+            spindle_locks: DriveSpindleLockManager::default(),
+            disk_probe: Arc::new(PosixDiskSpaceProbe::new()),
+            min_free_space_buffer: DEFAULT_MIN_FREE_SPACE_BUFFER_BYTES,
+        }
+    }
 }
 
 impl MasterIngestService {
@@ -34,7 +51,53 @@ impl MasterIngestService {
     }
 
     pub fn with_spindle_locks(spindle_locks: DriveSpindleLockManager) -> Self {
-        Self { spindle_locks }
+        Self {
+            spindle_locks,
+            ..Default::default()
+        }
+    }
+
+    pub fn with_probe(mut self, probe: Arc<dyn DiskSpaceProbe>) -> Self {
+        self.disk_probe = probe;
+        self
+    }
+
+    pub fn with_min_free_space_buffer(mut self, buffer_bytes: u64) -> Self {
+        self.min_free_space_buffer = buffer_bytes;
+        self
+    }
+
+    /// Resolves the optimal target volume within a storage pool for a file of `file_size_bytes`.
+    /// Evaluates volumes in pool priority sequence; spills over to the next volume if available
+    /// disk space is less than `file_size_bytes + min_free_space_buffer`.
+    pub fn resolve_pool_target_volume<'a>(
+        &self,
+        pool_volumes: &[&'a DriveDefinition],
+        file_size_bytes: u64,
+        probe: &dyn DiskSpaceProbe,
+        min_free_space_buffer: u64,
+    ) -> Result<&'a DriveDefinition, DeduplicationError> {
+        let mut max_avail = 0u64;
+        let pool_name = pool_volumes
+            .first()
+            .map(|v| v.group.clone())
+            .unwrap_or_else(|| "primary".to_string());
+
+        for vol in pool_volumes {
+            let avail = probe.available_space_bytes(&vol.mount_path).unwrap_or(0);
+            if avail > max_avail {
+                max_avail = avail;
+            }
+            if avail >= file_size_bytes.saturating_add(min_free_space_buffer) {
+                return Ok(vol);
+            }
+        }
+
+        Err(DeduplicationError::StoragePoolExhausted {
+            pool: pool_name,
+            required_bytes: file_size_bytes.saturating_add(min_free_space_buffer),
+            available_bytes: max_avail,
+        })
     }
 
     /// Formats calendar components into `<Year>` and `<DD-Mon-YYYY>` folder name.
@@ -235,6 +298,23 @@ impl MasterIngestService {
         };
 
         let matcher = CanonicalPathMatcher::new(config.clone());
+        let target_pool_volumes = config.get_pool_volumes(&target_drive.group);
+        let pool_volumes: Vec<&DriveDefinition> = if target_pool_volumes.is_empty() {
+            vec![target_drive]
+        } else {
+            target_pool_volumes
+        };
+
+        let mut volume_avail_space: std::collections::HashMap<String, u64> =
+            std::collections::HashMap::new();
+        for vol in &pool_volumes {
+            let avail = self
+                .disk_probe
+                .available_space_bytes(&vol.mount_path)
+                .unwrap_or(u64::MAX);
+            volume_avail_space.insert(vol.id.clone(), avail);
+        }
+
         let mut tasks: Vec<IngestTask> = Vec::with_capacity(unmastered_docs.len());
         let mut total_bytes = 0u64;
         let hasher = Blake3MediaHasher::new();
@@ -274,13 +354,21 @@ impl MasterIngestService {
                     if let Some(task_stem) = task.source_path.file_stem().and_then(|s| s.to_str()) {
                         if UnifiedFileTransferService::is_companion_sidecar_stem_match(task_stem, stem, &doc.file_context.extension) {
                             if let Some(task_parent) = task.target_path.parent() {
-                                if let Ok(rel_parent) = task_parent.strip_prefix(&target_drive.master_path) {
+                                let rel_parent = if let Ok(rel) = task_parent.strip_prefix(&target_drive.master_path) {
+                                    Some(rel.to_path_buf())
+                                } else if let Some(drive) = matcher.find_drive_for_path(task_parent) {
+                                    task_parent.strip_prefix(&drive.master_path).ok().map(|p| p.to_path_buf())
+                                } else {
+                                    None
+                                };
+
+                                if let Some(rel) = rel_parent {
                                     let sidecar_name = if is_dvd {
                                         doc.file_context.file_name.clone()
                                     } else {
                                         format!("{}.{}", task_stem, doc.file_context.extension)
                                     };
-                                    resolved_rel_path = Some(rel_parent.join(sidecar_name));
+                                    resolved_rel_path = Some(rel.join(sidecar_name));
                                     break;
                                 }
                             }
@@ -363,7 +451,40 @@ impl MasterIngestService {
                 )
             };
 
-            let initial_target_path = target_drive.master_path.join(&rel_path);
+            // Resolve target volume across storage pool with capacity spillover
+            let target_volume = {
+                let required = doc
+                    .file_context
+                    .file_size_bytes
+                    .saturating_add(self.min_free_space_buffer);
+                let mut chosen = None;
+                for vol in &pool_volumes {
+                    let avail = volume_avail_space.get(&vol.id).copied().unwrap_or(0);
+                    if avail >= required {
+                        chosen = Some(*vol);
+                        break;
+                    }
+                }
+                match chosen {
+                    Some(vol) => {
+                        if let Some(space) = volume_avail_space.get_mut(&vol.id) {
+                            *space = space.saturating_sub(doc.file_context.file_size_bytes);
+                        }
+                        vol
+                    }
+                    None => match self.resolve_pool_target_volume(
+                        &pool_volumes,
+                        doc.file_context.file_size_bytes,
+                        self.disk_probe.as_ref(),
+                        self.min_free_space_buffer,
+                    ) {
+                        Ok(vol) => vol,
+                        Err(_) => target_drive,
+                    },
+                }
+            };
+
+            let initial_target_path = target_volume.master_path.join(&rel_path);
 
             // 2. Collision resolution
             let source_hash = doc
@@ -572,13 +693,24 @@ impl MasterIngestService {
                         }
                     };
 
+                    let actual_target_drive = matcher.find_drive_for_path(&task.target_path);
+                    let actual_drive_id = actual_target_drive
+                        .map(|d| d.id.clone())
+                        .unwrap_or_else(|| plan.target_drive_id.clone());
+                    let actual_drive_group = actual_target_drive
+                        .map(|d| d.group.clone())
+                        .unwrap_or_else(|| target_group.clone());
+                    let actual_scanned_root = actual_target_drive
+                        .map(|d| d.master_path.clone())
+                        .unwrap_or_else(|| plan.target_master_root.clone());
+
                     let master_meta = DeduplicationMetadata {
                         cluster_id: Uuid::new_v4(),
                         status: DeduplicationStatus::CanonicalMaster,
                         canonical_master_id: Some(new_master_id),
                         canonical_master_path: Some(task.target_path.clone()),
-                        drive_id: Some(plan.target_drive_id.clone()),
-                        drive_group: Some(target_group.clone()),
+                        drive_id: Some(actual_drive_id),
+                        drive_group: Some(actual_drive_group),
                         is_in_master_path: true,
                         reclaimable_bytes: 0,
                         evaluated_at: now,
@@ -601,7 +733,7 @@ impl MasterIngestService {
                     let mut new_doc = match original_doc {
                         Some(mut d) => {
                             d.id = new_master_id;
-                            d.file_context.scanned_root = plan.target_master_root.clone();
+                            d.file_context.scanned_root = actual_scanned_root;
                             d.file_context.file_path = task.target_path.clone();
                             d.file_context.file_name = task
                                 .target_path
@@ -615,7 +747,7 @@ impl MasterIngestService {
                         None => MediaMetadataDocument {
                             id: new_master_id,
                             file_context: FileContext {
-                                scanned_root: plan.target_master_root.clone(),
+                                scanned_root: actual_scanned_root,
                                 file_path: task.target_path.clone(),
                                 relative_path: task.target_path.clone(),
                                 file_name: task
@@ -803,13 +935,24 @@ impl MasterIngestService {
                                 }
                             };
 
+                            let actual_target_drive = matcher.find_drive_for_path(&task.target_path);
+                            let actual_drive_id = actual_target_drive
+                                .map(|d| d.id.clone())
+                                .unwrap_or_else(|| plan.target_drive_id.clone());
+                            let actual_drive_group = actual_target_drive
+                                .map(|d| d.group.clone())
+                                .unwrap_or_else(|| target_group.clone());
+                            let actual_scanned_root = actual_target_drive
+                                .map(|d| d.master_path.clone())
+                                .unwrap_or_else(|| plan.target_master_root.clone());
+
                             let master_meta = DeduplicationMetadata {
                                 cluster_id: Uuid::new_v4(),
                                 status: DeduplicationStatus::CanonicalMaster,
                                 canonical_master_id: Some(new_master_id),
                                 canonical_master_path: Some(task.target_path.clone()),
-                                drive_id: Some(plan.target_drive_id.clone()),
-                                drive_group: Some(target_group.clone()),
+                                drive_id: Some(actual_drive_id),
+                                drive_group: Some(actual_drive_group),
                                 is_in_master_path: true,
                                 reclaimable_bytes: 0,
                                 evaluated_at: now,
@@ -832,7 +975,7 @@ impl MasterIngestService {
                             let mut new_doc = match original_doc {
                                 Some(mut d) => {
                                     d.id = new_master_id;
-                                    d.file_context.scanned_root = plan.target_master_root.clone();
+                                    d.file_context.scanned_root = actual_scanned_root;
                                     d.file_context.file_path = task.target_path.clone();
                                     d.file_context.file_name = task
                                         .target_path
@@ -846,7 +989,7 @@ impl MasterIngestService {
                                 None => MediaMetadataDocument {
                                     id: new_master_id,
                                     file_context: FileContext {
-                                        scanned_root: plan.target_master_root.clone(),
+                                        scanned_root: actual_scanned_root,
                                         file_path: task.target_path.clone(),
                                         relative_path: task.target_path.clone(),
                                         file_name: task

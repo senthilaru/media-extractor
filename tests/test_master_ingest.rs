@@ -1739,3 +1739,129 @@ async fn test_ingest_without_source_drive_ingests_all_unmastered_from_database()
     assert!(masters[0].file_context.file_path.exists());
     assert!(masters[0].file_context.file_path.starts_with(&primary_master));
 }
+
+#[tokio::test]
+async fn test_master_ingest_pool_spillover_capacity_aware() {
+    use metadata_extractor::infrastructure::disk_probe::MockDiskSpaceProbe;
+
+    let temp_root = tempdir().unwrap();
+    let vol1_mount = temp_root.path().join("primary_vol1");
+    let vol1_master = vol1_mount.join("SPSA").join("media").join("master");
+    let vol2_mount = temp_root.path().join("primary_vol2");
+    let vol2_master = vol2_mount.join("SPSA").join("media").join("master");
+
+    std::fs::create_dir_all(&vol1_master).unwrap();
+    std::fs::create_dir_all(&vol2_master).unwrap();
+
+    let staging_mount = temp_root.path().join("staging");
+    std::fs::create_dir_all(&staging_mount).unwrap();
+    let test_file = staging_mount.join("test_spillover.jpg");
+    std::fs::write(&test_file, b"sample image data for spillover test").unwrap();
+
+    let mut groups = HashMap::new();
+    groups.insert(
+        "primary".to_string(),
+        DriveGroupSpec {
+            priority: 100,
+            description: Some("Primary Pool".to_string()),
+        },
+    );
+
+    let config = DriveConfiguration {
+        version: "1.0".to_string(),
+        groups,
+        drives: vec![
+            DriveDefinition {
+                id: "primary_vol1".to_string(),
+                mount_path: vol1_mount.clone(),
+                master_path: vol1_master.clone(),
+                group: "primary".to_string(),
+            },
+            DriveDefinition {
+                id: "primary_vol2".to_string(),
+                mount_path: vol2_mount.clone(),
+                master_path: vol2_master.clone(),
+                group: "primary".to_string(),
+            },
+        ],
+        rules: DriveRules::default(),
+    };
+
+    // Configure mock disk probe: vol1 is full (only 1 MB free, well below 5 GB buffer), vol2 has 100 GB
+    let probe = Arc::new(MockDiskSpaceProbe::new());
+    probe.set_available_space(&vol1_mount, 1024 * 1024);
+    probe.set_available_space(&vol2_mount, 100 * 1024 * 1024 * 1024);
+
+    let service = MasterIngestService::new()
+        .with_probe(probe)
+        .with_min_free_space_buffer(5 * 1024 * 1024 * 1024);
+
+    let doc = MediaMetadataDocument {
+        id: Uuid::new_v4(),
+        file_context: FileContext {
+            scanned_root: staging_mount.clone(),
+            file_path: test_file.clone(),
+            relative_path: PathBuf::from("test_spillover.jpg"),
+            file_name: "test_spillover.jpg".to_string(),
+            file_size_bytes: 36,
+            extension: "jpg".to_string(),
+            media_category: MediaCategory::Photo,
+            modified_at: Some(Utc::now()),
+        },
+        temporal: TemporalMetadata::from_utc_datetime(
+            Utc::now(),
+            TimestampSource::ExifDateTimeOriginal,
+        ),
+        camera: None,
+        exposure: None,
+        location: None,
+        dimensions: None,
+        video: None,
+        fingerprint: None,
+        extraction_status: Default::default(),
+        dedup: Some(DeduplicationMetadata {
+            cluster_id: Uuid::new_v4(),
+            status: DeduplicationStatus::NeedsIngestToMaster,
+            canonical_master_id: None,
+            canonical_master_path: None,
+            drive_id: None,
+            drive_group: None,
+            is_in_master_path: false,
+            reclaimable_bytes: 0,
+            evaluated_at: Utc::now(),
+            replication: None,
+        }),
+    };
+
+    let sink = MockIngestStorageSink::default();
+    sink.save_batch(&[doc.clone()]).await.unwrap();
+
+    let opts = IngestOptions {
+        source_drive: staging_mount.to_string_lossy().to_string(),
+        target_drive: Some("primary".to_string()),
+        dry_run: false,
+        delete_source: false,
+        verify_hash: true,
+        buffer_config: Default::default(),
+    };
+
+    let plan = service.compile_plan(&sink, &config, &opts).await.unwrap();
+    assert_eq!(plan.tasks.len(), 1);
+    // Task must have spilled over to primary_vol2 because primary_vol1 has < 5 GB free!
+    assert!(
+        plan.tasks[0].target_path.starts_with(&vol2_master),
+        "Expected target path to start with vol2 master path {:?}, got {:?}",
+        vol2_master,
+        plan.tasks[0].target_path
+    );
+
+    let report = service.execute_ingest_plan(&sink, &config, plan, opts).await.unwrap();
+    assert_eq!(report.files_transferred, 1);
+
+    // Verify written file exists on vol2
+    let masters = sink.query_canonical_masters().await.unwrap();
+    assert_eq!(masters.len(), 1);
+    assert_eq!(masters[0].dedup.as_ref().unwrap().drive_id.as_deref(), Some("primary_vol2"));
+    assert!(masters[0].file_context.file_path.starts_with(&vol2_master));
+    assert!(masters[0].file_context.file_path.exists());
+}

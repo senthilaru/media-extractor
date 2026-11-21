@@ -1290,3 +1290,112 @@ async fn test_prune_all_drives_without_drive_parameter() {
     assert!(sink.find_document_by_id(dup2_id).await.unwrap().is_none());
     assert!(sink.find_document_by_id(master_id).await.unwrap().is_some());
 }
+
+#[tokio::test]
+async fn test_prune_forbidden_on_primary_and_replica_extension_pools() {
+    let temp_root = tempdir().unwrap();
+
+    let primary_main = temp_root.path().join("primary_main");
+    let primary_main_master = primary_main.join("SPSA").join("media").join("master");
+
+    let primary_ext = temp_root.path().join("primary_ext");
+    let primary_ext_master = primary_ext.join("SPSA").join("media").join("master");
+
+    let replica_ext = temp_root.path().join("replica_ext");
+    let replica_ext_master = replica_ext.join("SPSA").join("media").join("master");
+
+    std::fs::create_dir_all(&primary_main_master).unwrap();
+    std::fs::create_dir_all(&primary_ext_master).unwrap();
+    std::fs::create_dir_all(&replica_ext_master).unwrap();
+
+    let mut groups = HashMap::new();
+    groups.insert(
+        "primary".to_string(),
+        DriveGroupSpec {
+            priority: 100,
+            description: Some("Primary Pool".to_string()),
+        },
+    );
+    groups.insert(
+        "replica1".to_string(),
+        DriveGroupSpec {
+            priority: 80,
+            description: Some("Replica 1 Pool".to_string()),
+        },
+    );
+
+    let config = DriveConfiguration {
+        version: "1.0".to_string(),
+        groups,
+        drives: vec![
+            DriveDefinition {
+                id: "primary_main".to_string(),
+                mount_path: primary_main.clone(),
+                master_path: primary_main_master.clone(),
+                group: "primary".to_string(),
+            },
+            DriveDefinition {
+                id: "primary_ext_1".to_string(),
+                mount_path: primary_ext.clone(),
+                master_path: primary_ext_master.clone(),
+                group: "primary".to_string(),
+            },
+            DriveDefinition {
+                id: "replica_1_ext_1".to_string(),
+                mount_path: replica_ext.clone(),
+                master_path: replica_ext_master.clone(),
+                group: "replica1".to_string(),
+            },
+        ],
+        rules: DriveRules::default(),
+    };
+
+    let sink = MockPruneStorageSink::default();
+    let service = DrivePruningService::new();
+
+    // 1. Attempt prune targeting primary extension master directory
+    let res_pri_ext = service
+        .prune_drive(
+            &sink,
+            &config,
+            DrivePrunerOptions::for_drive(primary_ext_master.to_string_lossy(), false),
+        )
+        .await;
+
+    assert!(
+        res_pri_ext.is_err(),
+        "Pruning primary extension master must be rejected by archive protection"
+    );
+    match res_pri_ext.unwrap_err() {
+        metadata_extractor::domain::errors::DeduplicationError::PruneForbiddenOnProtectedArchive { .. } => {}
+        other => panic!("Expected PruneForbiddenOnProtectedArchive, got {:?}", other),
+    }
+
+    // 2. Attempt prune targeting replica extension master directory
+    let res_rep_ext = service
+        .prune_drive(
+            &sink,
+            &config,
+            DrivePrunerOptions::for_drive(replica_ext_master.to_string_lossy(), false),
+        )
+        .await;
+
+    assert!(
+        res_rep_ext.is_err(),
+        "Pruning replica extension master must be rejected by archive protection"
+    );
+    match res_rep_ext.unwrap_err() {
+        metadata_extractor::domain::errors::DeduplicationError::PruneForbiddenOnProtectedArchive { .. } => {}
+        other => panic!("Expected PruneForbiddenOnProtectedArchive, got {:?}", other),
+    }
+
+    // 3. Attempt safe_delete_file directly via ArchiveProtectionGuard
+    let guard = metadata_extractor::infrastructure::archive_guard::ArchiveProtectionGuard::from_config(&config);
+    let pri_ext_file = primary_ext_master.join("2026/01-Jan-2026/Photos/img.jpg");
+    assert!(guard.is_protected_path(&pri_ext_file));
+    assert!(guard.safe_delete_file(&pri_ext_file).is_err());
+
+    let rep_ext_file = replica_ext_master.join("2026/01-Jan-2026/Photos/img.jpg");
+    assert!(guard.is_protected_path(&rep_ext_file));
+    assert!(guard.safe_delete_file(&rep_ext_file).is_err());
+}
