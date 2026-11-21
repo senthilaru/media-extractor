@@ -53,7 +53,7 @@ drives:
     mount_path: "${DRIVE_PRIMARY_EXT1_MOUNT:-/Volumes/SPSA-11}"
     master_path: "${DRIVE_PRIMARY_EXT1_MASTER:-/Volumes/SPSA-11/SPSA/media/master}"
 
-	- id: "replica_1_ext_1"
-			group: "replica1"
-			mount_path: "${DRIVE_REPLICA1_EXT1_MOUNT:-/Volumes/SPSA-22}"
-			master_path: "${DRIVE_REPLICA1_EXT1_MASTER:-/Volumes/SPSA-22/SPSA/media/master}"
+  - id: "replica_1_ext_1"
+    group: "replica1"
+    mount_path: "${DRIVE_REPLICA1_EXT1_MOUNT:-/Volumes/SPSA-22}"
+    master_path: "${DRIVE_REPLICA1_EXT1_MASTER:-/Volumes/SPSA-22/SPSA/media/master}"

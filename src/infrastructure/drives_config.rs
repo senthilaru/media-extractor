@@ -92,9 +92,25 @@ impl DrivesConfigLoader {
             "json" => serde_json::from_str(&interpolated).map_err(|e| {
                 DeduplicationError::ConfigError(format!("Invalid JSON drive config: {}", e))
             })?,
-            _ => serde_yaml::from_str(&interpolated).map_err(|e| {
-                DeduplicationError::ConfigError(format!("Invalid YAML drive config: {}", e))
-            })?,
+            _ => match serde_yaml::from_str(&interpolated) {
+                Ok(cfg) => cfg,
+                Err(orig_err) => {
+                    if interpolated.contains('\t') {
+                        let detabbed = interpolated.replace('\t', "  ");
+                        serde_yaml::from_str(&detabbed).map_err(|_| {
+                            DeduplicationError::ConfigError(format!(
+                                "Invalid YAML drive config: {}",
+                                orig_err
+                            ))
+                        })?
+                    } else {
+                        return Err(DeduplicationError::ConfigError(format!(
+                            "Invalid YAML drive config: {}",
+                            orig_err
+                        )));
+                    }
+                }
+            },
         };
 
         Self::validate(&config)?;
@@ -600,5 +616,12 @@ mod tests {
         assert!(!matcher.is_primary_master(Path::new(
             "/Volumes/Replica1/SPSA/media/master/2026/01-Jan-2026/Photos/img.jpg"
         )));
+    }
+
+    #[test]
+    fn test_yaml_with_tabs_is_gracefully_handled() {
+        let yaml_with_tabs = "version: '1.0'\ngroups:\n  primary:\n    priority: 100\ndrives:\n\t- id: 'primary_main'\n\t  group: 'primary'\n\t  mount_path: '/mnt/p'\n\t  master_path: '/mnt/p/master'\n";
+        let config = DrivesConfigLoader::load_from_str(yaml_with_tabs, Some("yaml"));
+        assert!(config.is_ok(), "YAML with accidental tabs should load cleanly");
     }
 }
