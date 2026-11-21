@@ -436,6 +436,7 @@ async fn test_organize_pipeline_protected_source_rejected() {
         channel_capacity: 100,
         quiet: true,
         keep_source_dir: true,
+        require_master_disk: false,
     };
 
     let result = service.execute(&sink, &config, options).await;
@@ -470,6 +471,7 @@ async fn test_organize_pipeline_missing_source_rejected() {
         channel_capacity: 100,
         quiet: true,
         keep_source_dir: true,
+        require_master_disk: false,
     };
 
     let result = service.execute(&sink, &config, options).await;
@@ -525,6 +527,7 @@ async fn test_organize_pipeline_dry_run_and_execution() {
         channel_capacity: 100,
         quiet: true,
         keep_source_dir: true,
+        require_master_disk: false,
     };
 
     let dry_report = service
@@ -552,6 +555,7 @@ async fn test_organize_pipeline_dry_run_and_execution() {
         channel_capacity: 100,
         quiet: true,
         keep_source_dir: true,
+        require_master_disk: false,
     };
 
     let live_report = service
@@ -623,6 +627,7 @@ async fn test_organize_pipeline_skip_prune() {
         channel_capacity: 100,
         quiet: true,
         keep_source_dir: true,
+        require_master_disk: false,
     };
 
     let report = service
@@ -687,6 +692,7 @@ async fn test_organize_pipeline_cleans_empty_source_and_parents_up_to_drive_moun
         channel_capacity: 100,
         quiet: true,
         keep_source_dir: false,
+        require_master_disk: false,
     };
 
     let report = service

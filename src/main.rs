@@ -288,6 +288,10 @@ struct OrganizeArgs {
     #[arg(long, default_value_t = false)]
     keep_source_dir: bool,
 
+    /// Require canonical master drive to be mounted and verified on disk before deletion (defaults to false: verifies against database catalog when drive is offline)
+    #[arg(long, default_value_t = false)]
+    require_master_disk: bool,
+
     /// Batch size for discovery and extraction
     #[arg(short = 'b', long, default_value_t = 500)]
     batch_size: usize,
@@ -2141,6 +2145,7 @@ async fn run_organize_cli(args: OrganizeArgs) -> Result<(), Box<dyn std::error::
         channel_capacity: args.channel_capacity,
         quiet: args.quiet,
         keep_source_dir: args.keep_source_dir,
+        require_master_disk: args.require_master_disk,
     };
 
     let service = OrganizePipelineService::new();

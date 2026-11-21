@@ -465,6 +465,7 @@ async fn test_aae_sidecar_ingestion_replication_and_pruning() {
         channel_capacity: 100,
         quiet: true,
         keep_source_dir: true,
+        require_master_disk: false,
     };
 
     let report = service
@@ -556,6 +557,7 @@ async fn test_video_companion_aae_co_located_in_videos_folder() {
         channel_capacity: 100,
         quiet: true,
         keep_source_dir: false,
+        require_master_disk: false,
     };
 
     let report = service
@@ -676,6 +678,7 @@ async fn test_delayed_aae_routed_to_existing_master_companion() {
         channel_capacity: 100,
         quiet: true,
         keep_source_dir: false,
+        require_master_disk: false,
     };
 
     let report = service

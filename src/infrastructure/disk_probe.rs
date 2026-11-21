@@ -26,9 +26,23 @@ impl DiskSpaceProbe for PosixDiskSpaceProbe {
         let mut probe_path = path.to_path_buf();
         while !probe_path.exists() {
             if let Some(parent) = probe_path.parent() {
+                if parent == Path::new("/Volumes")
+                    || parent == Path::new("/mnt")
+                    || parent == Path::new("/media")
+                    || parent == Path::new("/")
+                {
+                    // The volume mount point itself does not exist (drive is unmounted)
+                    return Err(io::Error::new(
+                        io::ErrorKind::NotFound,
+                        format!("Drive mount path '{}' does not exist", path.display()),
+                    ));
+                }
                 probe_path = parent.to_path_buf();
             } else {
-                break;
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("Path '{}' does not exist", path.display()),
+                ));
             }
         }
 

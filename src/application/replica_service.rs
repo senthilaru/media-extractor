@@ -276,14 +276,23 @@ impl ReplicaSyncService {
             let mut volume_avail_space: std::collections::HashMap<String, u64> =
                 std::collections::HashMap::new();
             for vol in &group_volumes {
-                let avail = self
-                    .disk_probe
-                    .available_space_bytes(&vol.mount_path)
-                    .unwrap_or(u64::MAX);
+                let avail = if vol.mount_path.exists() {
+                    self.disk_probe
+                        .available_space_bytes(&vol.mount_path)
+                        .unwrap_or(0)
+                } else {
+                    0
+                };
                 volume_avail_space.insert(vol.id.clone(), avail);
             }
 
             for master in &canonical_masters {
+                // If master file does not physically exist on disk (e.g. source master drive is offline/unmounted),
+                // it cannot be replicated during this run.
+                if !master.file_context.file_path.exists() {
+                    continue;
+                }
+
                 let master_hash = master
                     .fingerprint
                     .as_ref()

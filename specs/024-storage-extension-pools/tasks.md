@@ -109,6 +109,8 @@
 - [X] T017 [P] Create end-to-end integration test `tests/test_storage_pools.rs` exercising multi-volume pool scan, deduplication, ingest spillover, replica sync, and prune protection
 - [X] T018 [P] Update `drives.example.yaml`, `README.md`, and `apis.md` with multi-volume storage pool configuration examples
 - [X] T019 Run full workspace test suite (`cargo test`) to ensure zero regressions across all existing features
+- [X] T020 Enable offline master tolerance in `DrivePruningService` and `OrganizePipelineService` so duplicate pruning verifies against the database catalog without requiring disconnected master drives to be physically mounted
+- [X] T021 Filter pool volumes in `MasterIngestService` and `PosixDiskSpaceProbe` to only consider mounted disks, preventing spurious probes or write attempts to detached volumes
 
 ---
 

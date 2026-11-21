@@ -84,6 +84,9 @@ impl MasterIngestService {
             .unwrap_or_else(|| "primary".to_string());
 
         for vol in pool_volumes {
+            if !vol.mount_path.exists() {
+                continue;
+            }
             let avail = probe.available_space_bytes(&vol.mount_path).unwrap_or(0);
             if avail > max_avail {
                 max_avail = avail;
@@ -299,19 +302,26 @@ impl MasterIngestService {
 
         let matcher = CanonicalPathMatcher::new(config.clone());
         let target_pool_volumes = config.get_pool_volumes(&target_drive.group);
-        let pool_volumes: Vec<&DriveDefinition> = if target_pool_volumes.is_empty() {
+        let mounted_pool_volumes: Vec<&DriveDefinition> = target_pool_volumes
+            .into_iter()
+            .filter(|v| v.mount_path.exists())
+            .collect();
+        let pool_volumes: Vec<&DriveDefinition> = if mounted_pool_volumes.is_empty() {
             vec![target_drive]
         } else {
-            target_pool_volumes
+            mounted_pool_volumes
         };
 
         let mut volume_avail_space: std::collections::HashMap<String, u64> =
             std::collections::HashMap::new();
         for vol in &pool_volumes {
-            let avail = self
-                .disk_probe
-                .available_space_bytes(&vol.mount_path)
-                .unwrap_or(u64::MAX);
+            let avail = if vol.mount_path.exists() {
+                self.disk_probe
+                    .available_space_bytes(&vol.mount_path)
+                    .unwrap_or(0)
+            } else {
+                0
+            };
             volume_avail_space.insert(vol.id.clone(), avail);
         }
 

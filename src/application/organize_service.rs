@@ -42,6 +42,27 @@ pub struct OrganizePipelineOptions {
     pub quiet: bool,
     /// Keep the source directory itself even if all files are ingested and it becomes empty (defaults to false)
     pub keep_source_dir: bool,
+    /// Require canonical master drive to be mounted and verified on disk before deletion (defaults to false: verifies against database catalog when drive is offline)
+    pub require_master_disk: bool,
+}
+
+impl Default for OrganizePipelineOptions {
+    fn default() -> Self {
+        Self {
+            source_path: None,
+            dry_run: false,
+            skip_prune: false,
+            no_verify_hash: false,
+            buffer_size: "8M".to_string(),
+            recheck_disk_hash: false,
+            force_reindex: false,
+            batch_size: 500,
+            channel_capacity: 100,
+            quiet: false,
+            keep_source_dir: false,
+            require_master_disk: false,
+        }
+    }
 }
 
 /// Comprehensive execution report for the full organize pipeline.
@@ -316,7 +337,7 @@ impl OrganizePipelineService {
                     .as_ref()
                     .map(|p| p.to_string_lossy().to_string()),
                 execute: !options.dry_run,
-                require_master_disk: true,
+                require_master_disk: options.require_master_disk,
                 manifest_out: None,
                 boundary_ceiling,
                 prune_empty_source_root: !options.keep_source_dir,

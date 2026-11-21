@@ -506,13 +506,28 @@ impl DrivePruningService {
                 }
             }
 
-            // 5. If required, verify master exists on mounted physical disk
-            if master_verified
-                && require_master_disk
-                && !master_path.as_os_str().is_empty()
-                && !master_path.exists()
-            {
-                master_verified = false;
+            // 5. Verification on physical disk:
+            // - If require_master_disk is true: strictly requires master_path to physically exist on disk.
+            // - If require_master_disk is false: if the master drive is mounted on disk, verifies that master_path
+            //   physically exists (to prevent deleting duplicates if a mounted master was removed); if the master
+            //   drive is unmounted (offline), trusts the catalog database verification.
+            if master_verified && !master_path.as_os_str().is_empty() {
+                if require_master_disk {
+                    if !master_path.exists() {
+                        master_verified = false;
+                    }
+                } else {
+                    let master_drive = config.drives.iter().find(|d| {
+                        master_path.starts_with(&d.master_path) || master_path.starts_with(&d.mount_path)
+                    });
+                    let is_master_drive_mounted = master_drive
+                        .map(|d| d.mount_path.exists())
+                        .unwrap_or(false);
+
+                    if is_master_drive_mounted && !master_path.exists() {
+                        master_verified = false;
+                    }
+                }
             }
 
             let task = DriveRemovalTask {

@@ -450,6 +450,7 @@ async fn test_vob_and_dvd_metadata_ingestion_replication_and_pruning() {
         channel_capacity: 100,
         quiet: true,
         keep_source_dir: false,
+        require_master_disk: false,
     };
 
     // 2. Execute end-to-end organize pipeline
@@ -563,6 +564,7 @@ async fn test_video_ts_root_ingestion_and_co_location() {
         channel_capacity: 100,
         quiet: true,
         keep_source_dir: false,
+        require_master_disk: false,
     };
 
     let report = service

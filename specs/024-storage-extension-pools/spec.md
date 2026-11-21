@@ -97,6 +97,8 @@ As a security-minded user, I want the system's `ArchiveProtectionGuard` to autom
   - Primary pool drives: `primary_vol1` (or `primary_main`), `primary_vol2` (or `primary_ext1`), `primary_vol3` (or `primary_ext2`), etc.
   - Replica pool drives: `replica_1_vol1`, `replica_1_vol2`, `replica_2_vol1`, `replica_2_vol2`, etc.
 - **FR-010**: The configuration loader MUST support declaring storage extension volumes in environment variables (e.g. `DRIVE_PRIMARY_EXT1_MOUNT`, `DRIVE_PRIMARY_EXT1_MASTER`, `DRIVE_REPLICA1_EXT1_MOUNT`, etc.).
+- **FR-011**: When a base primary drive is unmounted/offline, organizing on a mounted extension drive MUST verify duplicates against primary masters recorded in the MongoDB database catalog and safely prune eligible redundant files without requiring the offline master drive to be mounted on disk.
+- **FR-012**: Ingestion into a storage pool MUST only target currently mounted member volumes, creating only necessary directory paths for ingested files without mirroring directory trees from offline volumes.
 
 ### Key Entities
 

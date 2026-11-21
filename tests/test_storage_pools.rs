@@ -548,3 +548,235 @@ async fn test_storage_pools_complete_end_to_end_lifecycle() {
         .await;
     assert!(prune_res.is_err());
 }
+
+#[tokio::test]
+async fn test_offline_primary_with_mounted_extension_drive() {
+    let tmp = tempdir().unwrap();
+    // Simulate primary_main as unmounted (path does NOT exist on disk)
+    let offline_primary = tmp.path().join("OFFLINE_SP-1");
+    let offline_primary_master = offline_primary.join("media/master");
+
+    // Simulate primary_ext_1 as mounted
+    let ext_primary = tmp.path().join("SPSA-11");
+    let ext_primary_master = ext_primary.join("SPSA/media/master");
+    std::fs::create_dir_all(&ext_primary).unwrap();
+
+    // Source staging unorganized folder
+    let unorg_dir = ext_primary.join("unorganized");
+    std::fs::create_dir_all(&unorg_dir).unwrap();
+
+    let mut groups = HashMap::new();
+    groups.insert(
+        "primary".to_string(),
+        DriveGroupSpec {
+            priority: 100,
+            description: Some("Primary pool".to_string()),
+        },
+    );
+
+    let config = DriveConfiguration {
+        version: "1.0".to_string(),
+        groups,
+        drives: vec![
+            DriveDefinition {
+                id: "primary_main".to_string(),
+                group: "primary".to_string(),
+                mount_path: offline_primary.clone(),
+                master_path: offline_primary_master.clone(),
+            },
+            DriveDefinition {
+                id: "primary_ext_1".to_string(),
+                group: "primary".to_string(),
+                mount_path: ext_primary.clone(),
+                master_path: ext_primary_master.clone(),
+            },
+        ],
+        rules: DriveRules::default(),
+    };
+
+    let sink = EndToEndMockSink::default();
+
+    // 1. Create an existing canonical master document in DB located on the offline primary
+    let master_doc_id = Uuid::new_v4();
+    let master_file_path = offline_primary_master.join("2026/02-Feb-2026/Photos/existing_dup.jpg");
+    let master_doc = MediaMetadataDocument {
+        id: master_doc_id,
+        file_context: FileContext {
+            scanned_root: offline_primary_master.clone(),
+            file_path: master_file_path.clone(),
+            relative_path: PathBuf::from("2026/02-Feb-2026/Photos/existing_dup.jpg"),
+            file_name: "existing_dup.jpg".to_string(),
+            file_size_bytes: 2048,
+            extension: "jpg".to_string(),
+            media_category: MediaCategory::Photo,
+            modified_at: Some(Utc::now()),
+        },
+        temporal: TemporalMetadata::from_utc_datetime(
+            Utc::now(),
+            TimestampSource::FileSystemModified,
+        ),
+        camera: None,
+        exposure: None,
+        location: None,
+        dimensions: None,
+        video: None,
+        fingerprint: None,
+        extraction_status: Default::default(),
+        dedup: Some(DeduplicationMetadata {
+            cluster_id: Uuid::new_v4(),
+            status: DeduplicationStatus::CanonicalMaster,
+            canonical_master_id: Some(master_doc_id),
+            canonical_master_path: Some(master_file_path.clone()),
+            drive_id: Some("primary_main".to_string()),
+            drive_group: Some("primary".to_string()),
+            is_in_master_path: true,
+            reclaimable_bytes: 0,
+            evaluated_at: Utc::now(),
+            replication: None,
+        }),
+    };
+    sink.save_batch(&[master_doc]).await.unwrap();
+
+    // 2. Put a duplicate file in unorganized folder on SPSA-11
+    let dup_file_path = unorg_dir.join("existing_dup.jpg");
+    std::fs::write(&dup_file_path, b"dummy duplicate content on SPSA-11").unwrap();
+    let dup_doc_id = Uuid::new_v4();
+    let dup_doc = MediaMetadataDocument {
+        id: dup_doc_id,
+        file_context: FileContext {
+            scanned_root: unorg_dir.clone(),
+            file_path: dup_file_path.clone(),
+            relative_path: PathBuf::from("existing_dup.jpg"),
+            file_name: "existing_dup.jpg".to_string(),
+            file_size_bytes: 2048,
+            extension: "jpg".to_string(),
+            media_category: MediaCategory::Photo,
+            modified_at: Some(Utc::now()),
+        },
+        temporal: TemporalMetadata::from_utc_datetime(
+            Utc::now(),
+            TimestampSource::FileSystemModified,
+        ),
+        camera: None,
+        exposure: None,
+        location: None,
+        dimensions: None,
+        video: None,
+        fingerprint: None,
+        extraction_status: Default::default(),
+        dedup: Some(DeduplicationMetadata {
+            cluster_id: Uuid::new_v4(),
+            status: DeduplicationStatus::MarkForRemoval,
+            canonical_master_id: Some(master_doc_id),
+            canonical_master_path: Some(master_file_path.clone()),
+            drive_id: Some("primary_ext_1".to_string()),
+            drive_group: Some("primary".to_string()),
+            is_in_master_path: false,
+            reclaimable_bytes: 2048,
+            evaluated_at: Utc::now(),
+            replication: None,
+        }),
+    };
+    sink.save_batch(&[dup_doc]).await.unwrap();
+
+    // 3. Test Ingest of a NEW unique file onto primary_ext_1 (SPSA-11)
+    let new_file_path = unorg_dir.join("brand_new.jpg");
+    let new_content = b"brand new unique file content";
+    std::fs::write(&new_file_path, new_content).unwrap();
+    let new_doc_id = Uuid::new_v4();
+    let new_doc = MediaMetadataDocument {
+        id: new_doc_id,
+        file_context: FileContext {
+            scanned_root: unorg_dir.clone(),
+            file_path: new_file_path.clone(),
+            relative_path: PathBuf::from("brand_new.jpg"),
+            file_name: "brand_new.jpg".to_string(),
+            file_size_bytes: new_content.len() as u64,
+            extension: "jpg".to_string(),
+            media_category: MediaCategory::Photo,
+            modified_at: Some(Utc::now()),
+        },
+        temporal: TemporalMetadata::from_utc_datetime(
+            Utc::now(),
+            TimestampSource::FileSystemModified,
+        ),
+        camera: None,
+        exposure: None,
+        location: None,
+        dimensions: None,
+        video: None,
+        fingerprint: None,
+        extraction_status: Default::default(),
+        dedup: Some(DeduplicationMetadata {
+            cluster_id: Uuid::new_v4(),
+            status: DeduplicationStatus::NeedsIngestToMaster,
+            canonical_master_id: None,
+            canonical_master_path: None,
+            drive_id: Some("primary_ext_1".to_string()),
+            drive_group: Some("primary".to_string()),
+            is_in_master_path: false,
+            reclaimable_bytes: 0,
+            evaluated_at: Utc::now(),
+            replication: None,
+        }),
+    };
+    sink.save_batch(&[new_doc]).await.unwrap();
+
+    let probe = Arc::new(MockDiskSpaceProbe::new());
+    probe.set_available_space(&ext_primary, 50 * 1024 * 1024 * 1024);
+
+    let ingest_service = MasterIngestService::new().with_probe(probe);
+    let ingest_opts = IngestOptions {
+        source_drive: unorg_dir.to_string_lossy().to_string(),
+        target_drive: None,
+        dry_run: false,
+        delete_source: false,
+        verify_hash: true,
+        buffer_config: Default::default(),
+    };
+
+    let ingest_report = ingest_service
+        .execute_ingest(&sink, &config, ingest_opts)
+        .await
+        .unwrap();
+
+    assert_eq!(ingest_report.files_transferred, 1);
+    assert_eq!(ingest_report.target_drive_id, "primary_ext_1");
+    // Verify file was written to primary_ext_1 (SPSA-11), NOT the offline primary
+    let now = Utc::now();
+    use chrono::Datelike;
+    let (y, date_folder) = metadata_extractor::application::ingest_service::MasterIngestService::format_date_folder(
+        now.year(),
+        now.month(),
+        now.day(),
+    );
+    let written_file = ext_primary_master.join(format!("{}", y)).join(date_folder).join("Photos/brand_new.jpg");
+    assert!(written_file.exists());
+    assert!(!offline_primary.exists());
+
+    // 4. Test Pruning duplicate against offline primary master
+    let pruner = DrivePruningService::new();
+
+    // 4a. With require_master_disk = false (default: trust database catalog):
+    let prune_opts_default = DrivePrunerOptions {
+        drive_identifier: Some(unorg_dir.to_string_lossy().to_string()),
+        execute: true,
+        require_master_disk: false,
+        manifest_out: None,
+        boundary_ceiling: None,
+        prune_empty_source_root: false,
+        clean_empty_dirs: true,
+    };
+
+    let prune_report = pruner
+        .prune_drive(&sink, &config, prune_opts_default)
+        .await
+        .unwrap();
+
+    assert_eq!(prune_report.total_candidates, 2);
+    assert_eq!(prune_report.verified_masters, 2);
+    assert_eq!(prune_report.unverified_masters, 0);
+    assert_eq!(prune_report.files_deleted, 2);
+    assert!(!dup_file_path.exists(), "Duplicate on SPSA-11 must be pruned");
+    assert!(!new_file_path.exists(), "Ingested source on SPSA-11 must be pruned");
+}
