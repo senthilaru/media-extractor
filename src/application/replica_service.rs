@@ -254,11 +254,25 @@ impl ReplicaSyncService {
         let mut total_bytes = 0u64;
         let hasher = Blake3MediaHasher::new();
 
-        for (_group_name, group_volumes) in replica_groups {
-            // Query catalog records already present on ANY volume in this replica group
+        for (group_name, group_volumes) in replica_groups {
+            // Query catalog records already present on ANY volume in this replica group across the storage pool
+            // (including offline/unmounted volumes like SP-2 that are already cataloged in the database).
+            // If the user explicitly targeted a specific replica drive with --replica, only check that target drive.
+            let is_targeted_sync = options.target_replica_id.is_some();
+            let pool_volume_candidates: Vec<&DriveDefinition> = if let Some(ref target_id) = options.target_replica_id {
+                group_volumes.iter().copied().filter(|v| v.id == *target_id).collect()
+            } else {
+                let all_pool_volumes = config.get_pool_volumes(&group_name);
+                if all_pool_volumes.is_empty() {
+                    group_volumes.clone()
+                } else {
+                    all_pool_volumes
+                }
+            };
+
             let mut existing_hashes: HashSet<String> = HashSet::new();
             let mut existing_master_ids: HashSet<Uuid> = HashSet::new();
-            for vol in &group_volumes {
+            for vol in &pool_volume_candidates {
                 let existing_replicas = sink.query_replica_documents(&vol.id).await?;
                 for doc in existing_replicas {
                     if let Some(ref f) = doc.fingerprint {
@@ -302,7 +316,18 @@ impl ReplicaSyncService {
                     || master_hash
                         .as_ref()
                         .map(|h| existing_hashes.contains(h))
-                        .unwrap_or(false);
+                        .unwrap_or(false)
+                    || (!is_targeted_sync
+                        && master
+                            .dedup
+                            .as_ref()
+                            .and_then(|d| d.replication.as_ref())
+                            .map(|rep| {
+                                rep.replicated_drives.iter().any(|d_id| {
+                                    pool_volume_candidates.iter().any(|v| v.id == *d_id)
+                                })
+                            })
+                            .unwrap_or(false));
 
                 if is_already_registered {
                     continue; // Already replicated and cataloged on this replica group
