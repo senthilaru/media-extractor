@@ -40,3 +40,4 @@ ai-service/.venv/
 ai-service/models/
 ai-service/__pycache__/
 
+*.pt

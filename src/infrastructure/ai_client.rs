@@ -48,6 +48,7 @@ pub struct ObjectSceneResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DetectedFaceDto {
+    #[serde(alias = "box")]
     pub box_coordinates: [f32; 4],
     pub confidence: f32,
     pub expression: String,
@@ -159,22 +160,39 @@ impl AiSidecarClient {
             .unwrap_or_else(|_| service_script.clone());
 
         let venv_python = script_dir.join(".venv/bin/python3");
-        let python_cmd = if venv_python.exists() {
-            venv_python.to_string_lossy().to_string()
+        let (python_cmd, venv_dir) = if venv_python.exists() {
+            let abs_venv_py = std::env::current_dir()
+                .map(|cwd| cwd.join(&venv_python))
+                .unwrap_or_else(|_| venv_python.clone());
+            let abs_venv = std::env::current_dir()
+                .map(|cwd| cwd.join(script_dir.join(".venv")))
+                .unwrap_or_else(|_| script_dir.join(".venv"));
+            (abs_venv_py.to_string_lossy().to_string(), Some(abs_venv))
         } else if let Ok(venv_py) = std::env::var("VIRTUAL_ENV") {
-            let p = PathBuf::from(venv_py).join("bin/python3");
-            if p.exists() { p.to_string_lossy().to_string() } else { "python3".to_string() }
+            let p = PathBuf::from(&venv_py).join("bin/python3");
+            if p.exists() {
+                (p.to_string_lossy().to_string(), Some(PathBuf::from(venv_py)))
+            } else {
+                ("python3".to_string(), None)
+            }
         } else {
-            "python3".to_string()
+            ("python3".to_string(), None)
         };
 
-        let child = Command::new(&python_cmd)
-            .arg(&script_abs)
+        let mut cmd = Command::new(&python_cmd);
+        cmd.arg(&script_abs)
             .current_dir(&script_dir)
             .stdout(Stdio::null())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .map_err(AiClientError::ProcessSpawn)?;
+            .stderr(Stdio::inherit());
+
+        if let Some(ref venv) = venv_dir {
+            cmd.env("VIRTUAL_ENV", venv);
+            let bin_dir = venv.join("bin");
+            let existing_path = std::env::var("PATH").unwrap_or_default();
+            cmd.env("PATH", format!("{}:{}", bin_dir.display(), existing_path));
+        }
+
+        let child = cmd.spawn().map_err(AiClientError::ProcessSpawn)?;
 
         {
             let mut lock = self.child_process.lock().unwrap();

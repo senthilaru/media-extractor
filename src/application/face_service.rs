@@ -110,6 +110,8 @@ impl FaceManagementService {
         unnamed_only: bool,
         min_photos: Option<usize>,
     ) -> Result<Vec<PersonCluster>, StorageError> {
+        // Automatically cluster any newly extracted faces in the catalog
+        let _ = self.cluster_faces().await;
         let clusters = self.storage.list_person_clusters().await?;
         let filtered = clusters
             .into_iter()

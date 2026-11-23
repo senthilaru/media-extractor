@@ -6,6 +6,7 @@ Strictly reads files in READ-ONLY mode.
 
 from typing import List, Dict, Any, Optional
 import os
+import sys
 import re
 from pathlib import Path
 from PIL import Image
@@ -26,11 +27,25 @@ def get_yolo_model():
         return None
     if _YOLO_MODEL is None:
         try:
-            # Load lightweight YOLOv8 nano model
-            model_path = os.environ.get("YOLO_MODEL_PATH", "yolov8n.pt")
-            _YOLO_MODEL = YOLO(model_path)
+            # Resolve model weights path reliably
+            env_path = os.environ.get("YOLO_MODEL_PATH")
+            if env_path and Path(env_path).exists():
+                model_target = env_path
+            elif Path("yolov8n.pt").exists():
+                model_target = str(Path("yolov8n.pt").resolve())
+            elif (Path(__file__).resolve().parent.parent / "yolov8n.pt").exists():
+                model_target = str((Path(__file__).resolve().parent.parent / "yolov8n.pt").resolve())
+            elif (Path(__file__).resolve().parent.parent.parent / "yolov8n.pt").exists():
+                model_target = str((Path(__file__).resolve().parent.parent.parent / "yolov8n.pt").resolve())
+            else:
+                model_target = "yolov8n.pt"
+
+            print(f"[AI Service] Initializing YOLOv8 model from {model_target}...", file=sys.stderr)
+            _YOLO_MODEL = YOLO(model_target)
         except Exception as e:
-            print(f"[WARN] Failed to initialize YOLO model: {e}")
+            print(f"[WARN] Failed to initialize YOLO model: {e}", file=sys.stderr)
+            import traceback
+            traceback.print_exc()
             _YOLO_MODEL = None
     return _YOLO_MODEL
 

@@ -19,19 +19,28 @@ if str(current_dir) not in sys.path:
 # Import pipelines
 try:
     from pipelines.object_scene import detect_objects_and_scenes
-except Exception:
+except Exception as e:
+    import traceback
+    print(f"[AI Service] Warning importing object_scene: {e}", file=sys.stderr)
+    traceback.print_exc()
     def detect_objects_and_scenes(paths: List[str]) -> List[Dict[str, Any]]:
         return [{"file_path": p, "objects": [], "occasions": [], "error": None} for p in paths]
 
 try:
     from pipelines.face_engine import extract_faces
-except Exception:
+except Exception as e:
+    import traceback
+    print(f"[AI Service] Warning importing face_engine: {e}", file=sys.stderr)
+    traceback.print_exc()
     def extract_faces(paths: List[str]) -> List[Dict[str, Any]]:
         return [{"file_path": p, "faces": [], "error": None} for p in paths]
 
 try:
     from pipelines.ocr_engine import extract_ocr
-except Exception:
+except Exception as e:
+    import traceback
+    print(f"[AI Service] Warning importing ocr_engine: {e}", file=sys.stderr)
+    traceback.print_exc()
     def extract_ocr(paths: List[str]) -> List[Dict[str, Any]]:
         return [{"file_path": p, "text_snippets": [], "search_tokens": [], "error": None} for p in paths]
 
