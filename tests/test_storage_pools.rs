@@ -433,6 +433,7 @@ async fn test_storage_pools_complete_end_to_end_lifecycle() {
             evaluated_at: Utc::now(),
             replication: None,
         }),
+        visual: None,
     };
 
     sink.save_batch(&[incoming_doc]).await.unwrap();
@@ -492,6 +493,7 @@ async fn test_storage_pools_complete_end_to_end_lifecycle() {
         fingerprint: None,
         extraction_status: Default::default(),
         dedup: None,
+        visual: None,
     };
 
     let cluster = vec![pri1_doc.clone(), master.clone()];
@@ -634,6 +636,7 @@ async fn test_offline_primary_with_mounted_extension_drive() {
             evaluated_at: Utc::now(),
             replication: None,
         }),
+        visual: None,
     };
     sink.save_batch(&[master_doc]).await.unwrap();
 
@@ -676,6 +679,7 @@ async fn test_offline_primary_with_mounted_extension_drive() {
             evaluated_at: Utc::now(),
             replication: None,
         }),
+        visual: None,
     };
     sink.save_batch(&[dup_doc]).await.unwrap();
 
@@ -719,6 +723,7 @@ async fn test_offline_primary_with_mounted_extension_drive() {
             evaluated_at: Utc::now(),
             replication: None,
         }),
+        visual: None,
     };
     sink.save_batch(&[new_doc]).await.unwrap();
 

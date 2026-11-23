@@ -98,6 +98,7 @@ async fn test_mongodb_filter_unmodified_items_live() {
             fingerprint: None,
             extraction_status: ExtractionStatus::default(),
             dedup: None,
+            visual: None,
         },
         MediaMetadataDocument {
             id: Uuid::new_v4(),
@@ -123,6 +124,7 @@ async fn test_mongodb_filter_unmodified_items_live() {
             fingerprint: None,
             extraction_status: ExtractionStatus::default(),
             dedup: None,
+            visual: None,
         },
         MediaMetadataDocument {
             id: Uuid::new_v4(),
@@ -148,6 +150,7 @@ async fn test_mongodb_filter_unmodified_items_live() {
             fingerprint: None,
             extraction_status: ExtractionStatus::default(),
             dedup: None,
+            visual: None,
         },
     ];
 
@@ -273,6 +276,7 @@ async fn test_mongodb_filter_reextracts_failed_records() {
             error_message: Some("File not found on previous attempt".to_string()),
         },
         dedup: None,
+        visual: None,
     };
 
     let _ = sink.save_batch(&[failed_doc]).await;

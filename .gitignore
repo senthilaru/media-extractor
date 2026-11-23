@@ -26,3 +26,17 @@ Thumbs.db
 .cargo
 .agents
 out.txt
+
+# Python & AI Sidecar
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+ENV/
+env/
+ai-service/.venv/
+ai-service/models/
+ai-service/__pycache__/
+

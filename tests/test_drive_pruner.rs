@@ -293,6 +293,7 @@ fn create_doc_with_dedup(
             evaluated_at: now,
             replication: None,
         }),
+        visual: None,
     }
 }
 

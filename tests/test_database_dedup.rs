@@ -97,6 +97,7 @@ fn create_mock_doc(path_str: &str, size_bytes: u64, hash: &str) -> MediaMetadata
         }),
         extraction_status: ExtractionStatus::default(),
         dedup: None,
+        visual: None,
     }
 }
 

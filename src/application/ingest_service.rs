@@ -790,6 +790,7 @@ impl MasterIngestService {
                             fingerprint: None,
                             extraction_status: Default::default(),
                             dedup: Some(master_meta),
+                            visual: None,
                         },
                     };
 
@@ -1032,6 +1033,7 @@ impl MasterIngestService {
                                     fingerprint: None,
                                     extraction_status: Default::default(),
                                     dedup: Some(master_meta),
+                                    visual: None,
                                 },
                             };
 

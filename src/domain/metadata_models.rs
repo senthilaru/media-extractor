@@ -51,6 +51,10 @@ pub struct MediaMetadataDocument {
     /// Evaluated deduplication and replica status
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dedup: Option<crate::domain::dedup_models::DeduplicationMetadata>,
+
+    /// Visual semantic recognition metadata (objects, occasions, faces, OCR text)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visual: Option<crate::domain::visual_models::VisualSemanticMetadata>,
 }
 
 /// Filesystem and spatial path context relative to the scan root.

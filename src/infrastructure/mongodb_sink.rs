@@ -122,6 +122,26 @@ impl MetadataStorageSink for MongoDbStorageSink {
             IndexModel::builder()
                 .keys(doc! { "dedup.status": 1 })
                 .build(),
+            // Index for visual object tags
+            IndexModel::builder()
+                .keys(doc! { "visual.objects.label": 1 })
+                .build(),
+            // Index for visual occasion categories
+            IndexModel::builder()
+                .keys(doc! { "visual.occasions.category": 1 })
+                .build(),
+            // Index for person cluster identities
+            IndexModel::builder()
+                .keys(doc! { "visual.faces.person_id": 1 })
+                .build(),
+            // Index for facial expressions
+            IndexModel::builder()
+                .keys(doc! { "visual.faces.expressions.label": 1 })
+                .build(),
+            // Index for visual text search tokens
+            IndexModel::builder()
+                .keys(doc! { "visual.search_tokens": 1 })
+                .build(),
         ];
 
         self.collection.create_indexes(indexes).await.map_err(|e| {
@@ -489,6 +509,272 @@ impl MetadataStorageSink for MongoDbStorageSink {
         }
 
         Ok(total_modified)
+    }
+
+    async fn update_visual_metadata_batch(
+        &self,
+        updates: &[(uuid::Uuid, crate::domain::visual_models::VisualSemanticMetadata)],
+    ) -> Result<usize, StorageError> {
+        if updates.is_empty() {
+            return Ok(0);
+        }
+
+        let mut total_modified = 0;
+        for chunk in updates.chunks(1000) {
+            let mut models: Vec<WriteModel> = Vec::with_capacity(chunk.len());
+            for (doc_id, visual_meta) in chunk {
+                let json_meta = serde_json::to_value(visual_meta).map_err(|e| {
+                    StorageError::SerializationError(format!(
+                        "Failed to serialize VisualSemanticMetadata: {}",
+                        e
+                    ))
+                })?;
+                let bson_meta = json_to_bson(json_meta);
+
+                let filter = doc! { "id": doc_id.to_string() };
+                let update = doc! { "$set": { "visual": bson_meta } };
+
+                let update_model = UpdateOneModel::builder()
+                    .namespace(Namespace::new(
+                        &self.config.database_name,
+                        &self.config.collection_name,
+                    ))
+                    .filter(filter)
+                    .update(update)
+                    .build();
+
+                models.push(WriteModel::UpdateOne(update_model));
+            }
+
+            let bulk_res = self
+                .client
+                .bulk_write(models)
+                .ordered(false)
+                .await
+                .map_err(|e| StorageError::BulkWriteFailed {
+                    collection: self.config.collection_name.clone(),
+                    message: e.to_string(),
+                    is_transient: false,
+                })?;
+
+            total_modified += bulk_res.modified_count.max(0) as usize;
+        }
+
+        Ok(total_modified)
+    }
+
+    async fn save_person_cluster(
+        &self,
+        cluster: &crate::domain::person_cluster::PersonCluster,
+    ) -> Result<(), StorageError> {
+        let coll = self
+            .client
+            .database(&self.config.database_name)
+            .collection::<Document>("person_clusters");
+
+        let json_val = serde_json::to_value(cluster).map_err(|e| {
+            StorageError::SerializationError(format!("Failed to serialize PersonCluster: {}", e))
+        })?;
+        let bson_doc = json_to_bson(json_val);
+
+        if let Bson::Document(mut doc) = bson_doc {
+            doc.insert("id", cluster.id.to_string());
+            let filter = doc! { "id": cluster.id.to_string() };
+            let update = doc! { "$set": doc };
+            coll.update_one(filter, update)
+                .upsert(true)
+                .await
+                .map_err(|e| StorageError::BulkWriteFailed {
+                    collection: "person_clusters".to_string(),
+                    message: e.to_string(),
+                    is_transient: false,
+                })?;
+        }
+        Ok(())
+    }
+
+    async fn list_person_clusters(
+        &self,
+    ) -> Result<Vec<crate::domain::person_cluster::PersonCluster>, StorageError> {
+        let coll = self
+            .client
+            .database(&self.config.database_name)
+            .collection::<Document>("person_clusters");
+
+        let mut cursor = coll
+            .find(doc! {})
+            .sort(doc! { "total_photo_count": -1 })
+            .await
+            .map_err(|e| StorageError::QueryFailed {
+                collection: "person_clusters".to_string(),
+                message: e.to_string(),
+            })?;
+
+        let mut clusters = Vec::new();
+        while cursor.advance().await.map_err(|e| StorageError::QueryFailed {
+            collection: "person_clusters".to_string(),
+            message: e.to_string(),
+        })? {
+            let doc = cursor.deserialize_current().map_err(|e| StorageError::QueryFailed {
+                collection: "person_clusters".to_string(),
+                message: e.to_string(),
+            })?;
+            let json_val = bson_to_json(Bson::Document(doc));
+            if let Ok(cluster) = serde_json::from_value::<crate::domain::person_cluster::PersonCluster>(json_val) {
+                clusters.push(cluster);
+            }
+        }
+        Ok(clusters)
+    }
+
+    async fn update_person_name(
+        &self,
+        cluster_id: uuid::Uuid,
+        name: &str,
+    ) -> Result<bool, StorageError> {
+        let coll = self
+            .client
+            .database(&self.config.database_name)
+            .collection::<Document>("person_clusters");
+
+        let filter = doc! { "id": cluster_id.to_string() };
+        let update = doc! { "$set": { "display_name": name, "updated_at": Utc::now().to_rfc3339() } };
+
+        let res = coll
+            .update_one(filter, update)
+            .await
+            .map_err(|e| StorageError::BulkWriteFailed {
+                collection: "person_clusters".to_string(),
+                message: e.to_string(),
+                is_transient: false,
+            })?;
+
+        Ok(res.matched_count > 0)
+    }
+
+    async fn merge_person_clusters(
+        &self,
+        source_id: uuid::Uuid,
+        target_id: uuid::Uuid,
+    ) -> Result<bool, StorageError> {
+        let clusters = self.list_person_clusters().await?;
+        let source_opt = clusters.iter().find(|c| c.id == source_id).cloned();
+        let target_opt = clusters.iter().find(|c| c.id == target_id).cloned();
+
+        if let (Some(source), Some(mut target)) = (source_opt, target_opt) {
+            target.merge_with(&source);
+            self.save_person_cluster(&target).await?;
+
+            // Delete source cluster
+            let coll = self
+                .client
+                .database(&self.config.database_name)
+                .collection::<Document>("person_clusters");
+            let _ = coll.delete_one(doc! { "id": source_id.to_string() }).await;
+
+            // Reassign faces in media assets pointing to source_id to target_id
+            let media_coll = &self.collection;
+            let filter = doc! { "visual.faces.person_id": source_id.to_string() };
+            let update = doc! { "$set": { "visual.faces.$[elem].person_id": target_id.to_string() } };
+            let array_filters = vec![doc! { "elem.person_id": source_id.to_string() }];
+            let opts = mongodb::options::UpdateOptions::builder()
+                .array_filters(array_filters)
+                .build();
+
+            let _ = media_coll.update_many(filter, update).with_options(opts).await;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    async fn save_smart_album(
+        &self,
+        album: &crate::domain::smart_album::SmartAlbum,
+    ) -> Result<(), StorageError> {
+        let coll = self
+            .client
+            .database(&self.config.database_name)
+            .collection::<Document>("smart_albums");
+
+        let json_val = serde_json::to_value(album).map_err(|e| {
+            StorageError::SerializationError(format!("Failed to serialize SmartAlbum: {}", e))
+        })?;
+        let bson_doc = json_to_bson(json_val);
+
+        if let Bson::Document(mut doc) = bson_doc {
+            doc.insert("id", album.id.to_string());
+            let filter = doc! { "id": album.id.to_string() };
+            let update = doc! { "$set": doc };
+            coll.update_one(filter, update)
+                .upsert(true)
+                .await
+                .map_err(|e| StorageError::BulkWriteFailed {
+                    collection: "smart_albums".to_string(),
+                    message: e.to_string(),
+                    is_transient: false,
+                })?;
+        }
+        Ok(())
+    }
+
+    async fn list_smart_albums(
+        &self,
+    ) -> Result<Vec<crate::domain::smart_album::SmartAlbum>, StorageError> {
+        let coll = self
+            .client
+            .database(&self.config.database_name)
+            .collection::<Document>("smart_albums");
+
+        let mut cursor = coll
+            .find(doc! {})
+            .sort(doc! { "created_at": -1 })
+            .await
+            .map_err(|e| StorageError::QueryFailed {
+                collection: "smart_albums".to_string(),
+                message: e.to_string(),
+            })?;
+
+        let mut albums = Vec::new();
+        while cursor.advance().await.map_err(|e| StorageError::QueryFailed {
+            collection: "smart_albums".to_string(),
+            message: e.to_string(),
+        })? {
+            let doc = cursor.deserialize_current().map_err(|e| StorageError::QueryFailed {
+                collection: "smart_albums".to_string(),
+                message: e.to_string(),
+            })?;
+            let json_val = bson_to_json(Bson::Document(doc));
+            if let Ok(album) = serde_json::from_value::<crate::domain::smart_album::SmartAlbum>(json_val) {
+                albums.push(album);
+            }
+        }
+        Ok(albums)
+    }
+
+    async fn get_smart_album_by_id(
+        &self,
+        album_id: uuid::Uuid,
+    ) -> Result<Option<crate::domain::smart_album::SmartAlbum>, StorageError> {
+        let coll = self
+            .client
+            .database(&self.config.database_name)
+            .collection::<Document>("smart_albums");
+
+        let filter = doc! { "id": album_id.to_string() };
+        if let Some(doc) = coll
+            .find_one(filter)
+            .await
+            .map_err(|e| StorageError::QueryFailed {
+                collection: "smart_albums".to_string(),
+                message: e.to_string(),
+            })?
+        {
+            let json_val = bson_to_json(Bson::Document(doc));
+            Ok(serde_json::from_value::<crate::domain::smart_album::SmartAlbum>(json_val).ok())
+        } else {
+            Ok(None)
+        }
     }
 
     async fn query_removal_candidates(

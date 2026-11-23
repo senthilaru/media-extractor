@@ -60,6 +60,9 @@ pub enum ExtractionError {
     #[error("Corrupted or malformed header in '{path}': {message}")]
     CorruptHeader { path: PathBuf, message: String },
 
+    #[error("Visual inference failed for '{path}': {message}")]
+    InferenceFailed { path: PathBuf, message: String },
+
     #[error("Unsupported media format for extraction: '{0}'")]
     UnsupportedFormat(String),
 }

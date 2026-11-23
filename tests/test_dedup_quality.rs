@@ -116,6 +116,7 @@ fn create_mock_doc_with_dims(
         }),
         extraction_status: ExtractionStatus::default(),
         dedup: None,
+        visual: None,
     }
 }
 

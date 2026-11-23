@@ -658,6 +658,7 @@ async fn test_delayed_aae_routed_to_existing_master_companion() {
             evaluated_at: chrono::Utc::now(),
             replication: None,
         }),
+        visual: None,
     };
     sink.save_batch(&[master_doc]).await.unwrap();
 
@@ -781,6 +782,7 @@ async fn test_skipped_identical_media_still_transfers_companion_aae() {
             evaluated_at: chrono::Utc::now(),
             replication: None,
         }),
+        visual: None,
     };
     sink.save_batch(&[photo_doc]).await.unwrap();
 
@@ -997,6 +999,7 @@ async fn test_prune_drive_verifies_and_purges_redundant_aae_sidecar() {
             evaluated_at: chrono::Utc::now(),
             replication: None,
         }),
+        visual: None,
     };
 
     // 3. Insert redundant source sidecar in unorganized with DIFFERENT hash (e.g. edit variant)
@@ -1051,6 +1054,7 @@ async fn test_prune_drive_verifies_and_purges_redundant_aae_sidecar() {
             evaluated_at: chrono::Utc::now(),
             replication: None,
         }),
+        visual: None,
     };
 
     sink.save_batch(&[master_sidecar_doc, source_sidecar_doc]).await.unwrap();

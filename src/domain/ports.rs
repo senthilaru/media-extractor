@@ -285,6 +285,70 @@ pub trait MetadataStorageSink: Send + Sync {
         Ok(0)
     }
 
+    /// Bulk updates visual semantic metadata for evaluated records.
+    async fn update_visual_metadata_batch(
+        &self,
+        _updates: &[(uuid::Uuid, crate::domain::visual_models::VisualSemanticMetadata)],
+    ) -> Result<usize, StorageError> {
+        Ok(_updates.len())
+    }
+
+    /// Saves or updates a person cluster identity.
+    async fn save_person_cluster(
+        &self,
+        _cluster: &crate::domain::person_cluster::PersonCluster,
+    ) -> Result<(), StorageError> {
+        Ok(())
+    }
+
+    /// Lists all person clusters in the catalog.
+    async fn list_person_clusters(
+        &self,
+    ) -> Result<Vec<crate::domain::person_cluster::PersonCluster>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    /// Updates the display name of a person cluster.
+    async fn update_person_name(
+        &self,
+        _cluster_id: uuid::Uuid,
+        _name: &str,
+    ) -> Result<bool, StorageError> {
+        Ok(true)
+    }
+
+    /// Merges source person cluster into target cluster and updates photo face linkages.
+    async fn merge_person_clusters(
+        &self,
+        _source_id: uuid::Uuid,
+        _target_id: uuid::Uuid,
+    ) -> Result<bool, StorageError> {
+        Ok(true)
+    }
+
+    /// Saves or updates a virtual smart album.
+    async fn save_smart_album(
+        &self,
+        _album: &crate::domain::smart_album::SmartAlbum,
+    ) -> Result<(), StorageError> {
+        Ok(())
+    }
+
+    /// Lists all synthesized smart albums.
+    async fn list_smart_albums(
+        &self,
+    ) -> Result<Vec<crate::domain::smart_album::SmartAlbum>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    /// Retrieves a smart album by its ID.
+    async fn get_smart_album_by_id(
+        &self,
+        _album_id: uuid::Uuid,
+    ) -> Result<Option<crate::domain::smart_album::SmartAlbum>, StorageError> {
+        Ok(None)
+    }
+
     /// Bulk updates all non-canonical duplicate records sharing the given cryptographic hashes to link to their canonical master ID and path.
     async fn link_canonical_masters(
         &self,
@@ -352,6 +416,31 @@ pub trait MetadataStorageSink: Send + Sync {
     ) -> Result<usize, StorageError> {
         Ok(0)
     }
+}
+
+/// Port for asynchronous AI visual inference orchestration (objects, scenes, faces, OCR).
+#[async_trait::async_trait]
+pub trait VisualInferencePort: Send + Sync {
+    /// Informs whether the inference engine/sidecar is online and ready.
+    async fn is_available(&self) -> bool;
+
+    /// Extracts detected objects and scene occasions for a batch of local image paths.
+    async fn infer_objects_and_scenes(
+        &self,
+        file_paths: &[PathBuf],
+    ) -> Result<Vec<(PathBuf, Vec<crate::domain::visual_models::DetectedObject>, Vec<crate::domain::visual_models::DetectedOccasion>)>, ExtractionError>;
+
+    /// Extracts faces, expressions, and 512-d embeddings for a batch of local image paths.
+    async fn infer_faces(
+        &self,
+        file_paths: &[PathBuf],
+    ) -> Result<Vec<(PathBuf, Vec<crate::domain::visual_models::DetectedFace>)>, ExtractionError>;
+
+    /// Extracts visual text (OCR) snippets and search tokens for a batch of local image paths.
+    async fn infer_ocr(
+        &self,
+        file_paths: &[PathBuf],
+    ) -> Result<Vec<(PathBuf, Vec<crate::domain::visual_models::ExtractedTextSnippet>, Vec<String>)>, ExtractionError>;
 }
 
 /// Port for reporting live progress updates and phase transitions.

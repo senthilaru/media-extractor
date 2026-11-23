@@ -631,6 +631,7 @@ impl ReplicaSyncService {
                             fingerprint: None,
                             extraction_status: Default::default(),
                             dedup: Some(rep_meta),
+                            visual: None,
                         },
                     };
                     new_replica_docs.push(replica_doc);
@@ -757,6 +758,7 @@ impl ReplicaSyncService {
                                     fingerprint: None,
                                     extraction_status: Default::default(),
                                     dedup: Some(rep_meta),
+                                    visual: None,
                                 },
                             };
                             new_replica_docs.push(replica_doc);

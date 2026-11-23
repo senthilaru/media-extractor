@@ -315,6 +315,47 @@ When `.env` is present, you can simply run:
 
 ---
 
+## Visual Semantic Recognition, Face Search & Smart Albums
+
+Enrich cataloged media assets with local AI computer vision without modifying original files (strict non-destructive guarantee).
+
+### Core Capabilities
+- **Object Recognition**: Identifies physical objects (teddy bears, speakers, flowers, bicycles/cycles, iPhones/phones, TVs, remotes, etc.).
+- **Scene & Occasion Detection**: Classifies events (birthdays, Christmas, Halloween, parties, friends get-together, vacations, weddings).
+- **Facial Recognition & Emotions**: Detects faces, localizes expressions (`smile`, `happy`, `sad`, `crying`, `excited`), extracts 512-d normalized embeddings, and clusters individuals across photos.
+- **In-Image Optical Character Recognition (OCR)**: Detects text phrases and indexes word tokens on signs, shirts, and party banners.
+- **Virtual Smart Albums**: Automatically synthesizes named albums (e.g. `2024 - Maya's Birthday`) and selects optimal cover photos with zero duplicate files created on disk.
+- **Multi-Modal Semantic Search**: Search across objects, occasions, people, facial expressions, OCR words, and calendar years.
+
+### Commands
+
+```bash
+# 1. Enrich cataloged assets with visual semantic features
+metadata-extractor enrich --enable-objects --enable-faces --enable-ocr
+
+# 2. Manage face clusters & assign names
+metadata-extractor faces list
+metadata-extractor faces name --cluster-id <UUID> --name "Maya"
+metadata-extractor faces merge --source <UUID> --target <UUID>
+
+# 3. Multi-modal semantic search
+metadata-extractor search --object "teddy_bear"
+metadata-extractor search --occasion "birthday"
+metadata-extractor search --person "Maya" --expression "smile"
+metadata-extractor search --text "Liam"
+metadata-extractor search "beach" --person "Maya" --year 2024 --format table
+
+# 4. Generate & export virtual smart albums
+metadata-extractor albums generate --year 2024
+metadata-extractor albums list
+metadata-extractor albums export --album-id <UUID> --destination /Volumes/SP-1/SmartAlbums/2024_Maya_Birthday
+```
+
+> [!NOTE]
+> **Strict Non-Destructive Invariant**: Original canonical master media files are strictly read-only and immutable. Extracted visual tags, face boxes, emotions, embeddings, OCR tokens, and album memberships exist purely in external MongoDB database catalog structures.
+
+---
+
 ## Supported Media Formats
 
 - **Photos**: JPG, JPEG, PNG, WEBP, GIF, BMP, HEIC, HEIF, AVIF, TIFF, TIF

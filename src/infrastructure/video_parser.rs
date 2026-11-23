@@ -510,6 +510,7 @@ impl MediaMetadataExtractor for VideoMetadataExtractor {
                 error_message: None,
             },
             dedup: None,
+            visual: None,
         })
     }
 }

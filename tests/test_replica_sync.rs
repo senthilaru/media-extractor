@@ -314,6 +314,7 @@ fn create_canonical_master_doc(
             evaluated_at: dt,
             replication: None,
         }),
+        visual: None,
     }
 }
 
@@ -806,6 +807,7 @@ async fn test_replica_sync_multi_volume_pool_presence_and_spillover() {
             evaluated_at: Utc::now(),
             replication: None,
         }),
+        visual: None,
     };
 
     // Case 2: Master file 2 is ALREADY present on rep1_vol1
@@ -853,6 +855,7 @@ async fn test_replica_sync_multi_volume_pool_presence_and_spillover() {
             evaluated_at: Utc::now(),
             replication: None,
         }),
+        visual: None,
     };
 
     let sink = MockReplicaStorageSink::default();

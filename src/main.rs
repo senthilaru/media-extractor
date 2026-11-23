@@ -154,6 +154,18 @@ enum Commands {
     /// Purge all catalog and database records originating from an unwanted source directory or file path
     #[command(alias = "purge", alias = "remove-source", alias = "unindex")]
     PurgeSource(PurgeSourceArgs),
+
+    /// Enrich media assets with visual semantic features (objects, faces, OCR, occasions)
+    Enrich(EnrichArgs),
+
+    /// Manage recognized person clusters and assign names
+    Faces(FacesArgs),
+
+    /// Semantic multi-modal search across visual objects, occasions, people, expressions, and text
+    Search(SearchArgs),
+
+    /// Synthesize and manage virtual smart albums without duplicating files
+    Albums(AlbumsArgs),
 }
 
 #[derive(Parser, Debug)]
@@ -190,6 +202,176 @@ struct PurgeSourceArgs {
     /// Target MongoDB collection name override
     #[arg(long, visible_alias = "db-collection", env = "MONGODB_COLLECTION")]
     collection: Option<String>,
+}
+
+#[derive(Parser, Debug)]
+struct EnrichArgs {
+    /// Restrict enrichment to files matching path prefix (or all un-enriched if omitted)
+    #[arg(short = 's', long)]
+    source: Option<PathBuf>,
+
+    /// Path to drive configuration YAML file
+    #[arg(
+        short = 'c',
+        long,
+        default_value = "drives.yaml",
+        env = "MEDIA_DRIVES_CONFIG"
+    )]
+    config: PathBuf,
+
+    /// Extract object and scene labels
+    #[arg(long, default_value_t = true)]
+    enable_objects: bool,
+
+    /// Detect faces, expressions, and compute embeddings
+    #[arg(long, default_value_t = true)]
+    enable_faces: bool,
+
+    /// Extract visible text snippets (OCR)
+    #[arg(long, default_value_t = true)]
+    enable_ocr: bool,
+
+    /// Minimum confidence threshold for recording detected features
+    #[arg(long, default_value_t = 0.60)]
+    min_confidence: f32,
+
+    /// Inference batch size for hardware acceleration
+    #[arg(short = 'b', long, default_value_t = 50)]
+    batch_size: usize,
+
+    /// Force re-analysis of already enriched media assets
+    #[arg(long, default_value_t = false)]
+    force: bool,
+
+    /// Run inference and preview results without updating database
+    #[arg(long, default_value_t = false)]
+    dry_run: bool,
+
+    /// MongoDB connection URI override
+    #[arg(long, visible_alias = "db-uri", env = "MONGODB_URI")]
+    mongodb_uri: Option<String>,
+
+    /// Target MongoDB collection name override
+    #[arg(long, visible_alias = "db-collection", env = "MONGODB_COLLECTION")]
+    collection: Option<String>,
+}
+
+#[derive(Parser, Debug)]
+struct FacesArgs {
+    #[command(subcommand)]
+    command: FacesCommands,
+
+    /// MongoDB connection URI override
+    #[arg(long, visible_alias = "db-uri", env = "MONGODB_URI")]
+    mongodb_uri: Option<String>,
+
+    /// Target MongoDB collection name override
+    #[arg(long, visible_alias = "db-collection", env = "MONGODB_COLLECTION")]
+    collection: Option<String>,
+}
+
+#[derive(Subcommand, Debug)]
+enum FacesCommands {
+    /// Lists recognized person clusters
+    List {
+        #[arg(long, default_value_t = false)]
+        unnamed_only: bool,
+        #[arg(long)]
+        min_photos: Option<usize>,
+    },
+    /// Assigns a name to a specific person cluster ID
+    Name {
+        #[arg(long)]
+        cluster_id: uuid::Uuid,
+        #[arg(long)]
+        name: String,
+    },
+    /// Merges two duplicate person clusters into a single identity
+    Merge {
+        #[arg(long)]
+        source: uuid::Uuid,
+        #[arg(long)]
+        target: uuid::Uuid,
+    },
+}
+
+#[derive(Parser, Debug)]
+struct SearchArgs {
+    /// Free-text keyword search across tags, objects, and OCR words
+    #[arg(value_name = "QUERY")]
+    query: Option<String>,
+
+    /// Filter by recognized person name
+    #[arg(long)]
+    person: Option<String>,
+
+    /// Filter by facial expression (smile, happy, sad, crying)
+    #[arg(long)]
+    expression: Option<String>,
+
+    /// Filter by detected physical object (e.g. teddy_bear, bicycle)
+    #[arg(long)]
+    object: Option<String>,
+
+    /// Filter by scene or occasion context (e.g. birthday, christmas)
+    #[arg(long)]
+    occasion: Option<String>,
+
+    /// Filter by in-image OCR text
+    #[arg(long)]
+    text: Option<String>,
+
+    /// Filter by calendar year (e.g. 2024)
+    #[arg(long)]
+    year: Option<u32>,
+
+    /// Output formatting (table, json, paths)
+    #[arg(long, default_value = "table")]
+    format: String,
+
+    /// MongoDB connection URI override
+    #[arg(long, visible_alias = "db-uri", env = "MONGODB_URI")]
+    mongodb_uri: Option<String>,
+
+    /// Target MongoDB collection name override
+    #[arg(long, visible_alias = "db-collection", env = "MONGODB_COLLECTION")]
+    collection: Option<String>,
+}
+
+#[derive(Parser, Debug)]
+struct AlbumsArgs {
+    #[command(subcommand)]
+    command: AlbumsCommands,
+
+    /// MongoDB connection URI override
+    #[arg(long, visible_alias = "db-uri", env = "MONGODB_URI")]
+    mongodb_uri: Option<String>,
+
+    /// Target MongoDB collection name override
+    #[arg(long, visible_alias = "db-collection", env = "MONGODB_COLLECTION")]
+    collection: Option<String>,
+}
+
+#[derive(Subcommand, Debug)]
+enum AlbumsCommands {
+    /// Generates virtual smart albums from cataloged events and occasions
+    Generate {
+        #[arg(long)]
+        year: Option<u32>,
+        #[arg(long)]
+        min_photos: Option<usize>,
+        #[arg(long, default_value_t = false)]
+        dry_run: bool,
+    },
+    /// Lists established smart albums
+    List,
+    /// Exports album photos as symlinks or manifest
+    Export {
+        #[arg(long)]
+        album_id: uuid::Uuid,
+        #[arg(long)]
+        destination: PathBuf,
+    },
 }
 
 #[derive(Parser, Debug)]
@@ -740,6 +922,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Commands::Organize(args) => run_organize_cli(args).await?,
             Commands::Report(args) => run_report_cli(args).await?,
             Commands::PurgeSource(args) => run_purge_source(args).await?,
+            Commands::Enrich(args) => run_enrich(args).await?,
+            Commands::Faces(args) => run_faces(args).await?,
+            Commands::Search(args) => run_search(args).await?,
+            Commands::Albums(args) => run_albums(args).await?,
         }
     } else if let Some(path) = cli.path {
         let args = ExtractArgs {
@@ -2448,5 +2634,181 @@ async fn run_purge_source(args: PurgeSourceArgs) -> Result<(), Box<dyn std::erro
     }
     println!("================================================================================");
 
+    Ok(())
+}
+
+async fn run_enrich(args: EnrichArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let db_config = resolve_db_config(args.mongodb_uri, args.collection);
+    let sink = match MongoDbStorageSink::connect(db_config.clone()).await {
+        Ok(s) => std::sync::Arc::new(s),
+        Err(e) => {
+            eprintln!("Database connection error: {}", e);
+            std::process::exit(3);
+        }
+    };
+
+    let ai_client = metadata_extractor::infrastructure::ai_client::AiSidecarClient::new(None);
+    if let Err(e) = ai_client.ensure_service_running(None).await {
+        eprintln!("Warning: AI sidecar could not be verified: {}", e);
+    }
+
+    let vision_adapter = std::sync::Arc::new(
+        metadata_extractor::infrastructure::vision_adapter::VisionInferenceAdapter::new(ai_client),
+    );
+
+    let enrichment_service = metadata_extractor::application::visual_service::VisualEnrichmentService::new(
+        sink,
+        vision_adapter,
+    );
+
+    let options = metadata_extractor::application::visual_service::EnrichOptions {
+        source: args.source,
+        enable_objects: args.enable_objects,
+        enable_faces: args.enable_faces,
+        enable_ocr: args.enable_ocr,
+        min_confidence: args.min_confidence,
+        batch_size: args.batch_size,
+        force: args.force,
+        dry_run: args.dry_run,
+    };
+
+    let report = enrichment_service.execute_enrichment(&options).await?;
+
+    println!("================================================================================");
+    println!("VISUAL SEMANTIC ENRICHMENT SUMMARY");
+    println!("================================================================================");
+    println!("Candidates Evaluated : {}", report.total_candidates);
+    println!("Assets Enriched      : {}", report.total_enriched);
+    println!("Objects Detected     : {}", report.objects_detected);
+    println!("Occasions Detected   : {}", report.occasions_detected);
+    println!("Faces Detected       : {}", report.faces_detected);
+    println!("OCR Snippets Extracted: {}", report.ocr_snippets_extracted);
+    println!("Elapsed Time         : {:.2}s", report.elapsed_seconds);
+    println!("================================================================================");
+
+    Ok(())
+}
+
+async fn run_search(args: SearchArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let db_config = resolve_db_config(args.mongodb_uri, args.collection);
+    let sink = match MongoDbStorageSink::connect(db_config.clone()).await {
+        Ok(s) => std::sync::Arc::new(s),
+        Err(e) => {
+            eprintln!("Database connection error: {}", e);
+            std::process::exit(3);
+        }
+    };
+
+    let search_service = metadata_extractor::application::search_service::SearchService::new(sink);
+    let criteria = metadata_extractor::application::search_service::SearchCriteria {
+        query: args.query,
+        person: args.person,
+        expression: args.expression,
+        object: args.object,
+        occasion: args.occasion,
+        text: args.text,
+        year: args.year,
+    };
+
+    let format: metadata_extractor::application::search_service::SearchOutputFormat = args
+        .format
+        .parse()
+        .unwrap_or(metadata_extractor::application::search_service::SearchOutputFormat::Table);
+
+    let results = search_service.execute_search(&criteria).await?;
+    let output = search_service.format_results(&results, format);
+    println!("{}", output);
+
+    Ok(())
+}
+
+async fn run_faces(args: FacesArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let db_config = resolve_db_config(args.mongodb_uri, args.collection);
+    let sink = match MongoDbStorageSink::connect(db_config.clone()).await {
+        Ok(s) => std::sync::Arc::new(s),
+        Err(e) => {
+            eprintln!("Database connection error: {}", e);
+            std::process::exit(3);
+        }
+    };
+
+    let face_service = metadata_extractor::application::face_service::FaceManagementService::new(sink);
+
+    match args.command {
+        FacesCommands::List { unnamed_only, min_photos } => {
+            let clusters = face_service.list_clusters(unnamed_only, min_photos).await?;
+            if clusters.is_empty() {
+                println!("No person clusters found. Run 'enrich --enable-faces' to extract faces.");
+            } else {
+                println!("{:<36} | {:<20} | {:<8}", "Cluster ID", "Name", "Photos");
+                println!("{}", "-".repeat(70));
+                for c in clusters {
+                    let name = c.display_name.unwrap_or_else(|| "[Unnamed]".to_string());
+                    println!("{:<36} | {:<20} | {:<8}", c.id, name, c.total_photo_count);
+                }
+            }
+        }
+        FacesCommands::Name { cluster_id, name } => {
+            let success = face_service.name_cluster(cluster_id, &name).await?;
+            if success {
+                println!("Successfully assigned name '{}' to person cluster {}.", name, cluster_id);
+            } else {
+                eprintln!("Cluster {} not found.", cluster_id);
+            }
+        }
+        FacesCommands::Merge { source, target } => {
+            let success = face_service.merge_clusters(source, target).await?;
+            if success {
+                println!("Successfully merged cluster {} into {}.", source, target);
+            } else {
+                eprintln!("Failed to merge clusters (source or target not found).");
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn run_albums(args: AlbumsArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let db_config = resolve_db_config(args.mongodb_uri, args.collection);
+    let sink = match MongoDbStorageSink::connect(db_config.clone()).await {
+        Ok(s) => std::sync::Arc::new(s),
+        Err(e) => {
+            eprintln!("Database connection error: {}", e);
+            std::process::exit(3);
+        }
+    };
+
+    let album_service = metadata_extractor::application::album_service::SmartAlbumSynthesisService::new(sink);
+
+    match args.command {
+        AlbumsCommands::Generate { year, min_photos, dry_run } => {
+            let options = metadata_extractor::application::album_service::AlbumSynthesisOptions {
+                year,
+                min_photos: min_photos.unwrap_or(3),
+                dry_run,
+            };
+            let albums = album_service.synthesize_albums(&options).await?;
+            println!("Synthesized {} smart albums.", albums.len());
+            for a in albums {
+                println!("  - [{}] {} ({} photos)", a.id, a.title, a.asset_ids.len());
+            }
+        }
+        AlbumsCommands::List => {
+            let albums = album_service.list_albums().await?;
+            if albums.is_empty() {
+                println!("No smart albums found. Run 'albums generate' first.");
+            } else {
+                println!("{:<36} | {:<40} | {:<8}", "Album ID", "Title", "Photos");
+                println!("{}", "-".repeat(88));
+                for a in albums {
+                    println!("{:<36} | {:<40} | {:<8}", a.id, a.title, a.asset_ids.len());
+                }
+            }
+        }
+        AlbumsCommands::Export { album_id, destination } => {
+            let count = album_service.export_album_as_symlinks(album_id, &destination).await?;
+            println!("Successfully exported {} album photos as symlinks to {}.", count, destination.display());
+        }
+    }
     Ok(())
 }

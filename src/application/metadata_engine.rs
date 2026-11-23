@@ -147,6 +147,7 @@ impl MetadataExtractionEngine {
                 error_message: Some(err.to_string()),
             },
             dedup: None,
+            visual: None,
         }
     }
 

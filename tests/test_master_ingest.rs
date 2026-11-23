@@ -397,6 +397,7 @@ fn create_unmastered_doc(
             evaluated_at: dt,
             replication: None,
         }),
+        visual: None,
     }
 }
 
@@ -1169,6 +1170,7 @@ async fn test_ingest_updates_canonical_master_id_for_all_duplicate_records() {
             evaluated_at: now,
             replication: None,
         }),
+        visual: None,
     };
 
     let doc1 = make_doc(
@@ -1376,6 +1378,7 @@ async fn test_ingest_5_copies_cluster_registers_master_and_links_all_duplicates_
                 evaluated_at: now,
                 replication: None,
             }),
+            visual: None,
         });
     }
 
@@ -1564,6 +1567,7 @@ async fn test_ingest_delete_source_never_deletes_protected_archive() {
             evaluated_at: Utc::now(),
             replication: None,
         }),
+        visual: None,
     };
     sink.save_batch(&[replica_doc]).await.unwrap();
 
@@ -1694,6 +1698,7 @@ async fn test_ingest_without_source_drive_ingests_all_unmastered_from_database()
             evaluated_at: Utc::now(),
             replication: None,
         }),
+        visual: None,
     };
     sink.save_batch(&[unmastered_doc]).await.unwrap();
 
@@ -1831,6 +1836,7 @@ async fn test_master_ingest_pool_spillover_capacity_aware() {
             evaluated_at: Utc::now(),
             replication: None,
         }),
+        visual: None,
     };
 
     let sink = MockIngestStorageSink::default();

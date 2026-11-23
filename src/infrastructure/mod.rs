@@ -1,3 +1,4 @@
+pub mod ai_client;
 pub mod archive_guard;
 pub mod blake3_hasher;
 pub mod classifier;
@@ -13,6 +14,7 @@ pub mod raster_decoder;
 pub mod telemetry;
 pub mod terminal_progress;
 pub mod video_parser;
+pub mod vision_adapter;
 pub mod walker;
 
 pub use disk_probe::{DiskSpaceProbe, MockDiskSpaceProbe, PosixDiskSpaceProbe};

@@ -211,6 +211,7 @@ fn create_sample_doc(
             evaluated_at: now,
             replication: None,
         }),
+        visual: None,
     }
 }
 
