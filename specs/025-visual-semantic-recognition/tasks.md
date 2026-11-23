@@ -80,6 +80,7 @@
 - [X] T020 [US2] Implement `PersonCluster` persistence and query methods (`save_person_cluster`, `list_person_clusters`, `update_person_name`, `merge_clusters`) in `src/infrastructure/mongodb_sink.rs`
 - [X] T021 [US2] Implement `FaceManagementService` in `src/application/face_service.rs` orchestrating face cluster discovery, naming, and merging
 - [X] T022 [US2] Add CLI commands `faces list`, `faces name`, `faces merge`, and search filters `--person <NAME>`, `--expression <EMOTION>` in `src/main.rs`
+- [X] T022b [US2] Implement cluster photo inspection CLI command `faces show --cluster-id <UUID> [--limit N]` (aliases: `photos`, `files`) and `search --cluster-id <UUID>` in `src/application/face_service.rs` and `src/main.rs`
 - [X] T023 [P] [US2] Add integration test in `tests/test_face_clustering.rs` verifying face detection, expression assignment, and cluster identity merging
 
 **Checkpoint**: User Stories 1 and 2 work independently and in combination.

@@ -29,6 +29,7 @@ impl std::str::FromStr for SearchOutputFormat {
 pub struct SearchCriteria {
     pub query: Option<String>,
     pub person: Option<String>,
+    pub cluster_id: Option<uuid::Uuid>,
     pub expression: Option<String>,
     pub object: Option<String>,
     pub occasion: Option<String>,
@@ -59,7 +60,9 @@ impl SearchService {
                 message: format!("Search query error: {e}"),
             })?;
 
-        let target_person_id = if let Some(ref person_name) = criteria.person {
+        let target_person_id = if let Some(cid) = criteria.cluster_id {
+            Some(cid)
+        } else if let Some(ref person_name) = criteria.person {
             let clusters = self.storage.list_person_clusters().await.unwrap_or_default();
             let name_lower = person_name.to_lowercase();
             clusters
@@ -105,6 +108,7 @@ impl SearchService {
                     || criteria.expression.is_some()
                     || criteria.text.is_some()
                     || criteria.person.is_some()
+                    || criteria.cluster_id.is_some()
                     || criteria.query.is_some()
                 {
                     return false;
@@ -113,8 +117,8 @@ impl SearchService {
             }
         };
 
-        // 2. Person filter
-        if criteria.person.is_some() {
+        // 2. Person / Cluster filter
+        if criteria.person.is_some() || criteria.cluster_id.is_some() {
             match target_person_id {
                 Some(pid) => {
                     let has_person = visual.faces.iter().any(|f| f.person_id == Some(pid));

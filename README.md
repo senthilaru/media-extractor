@@ -333,8 +333,12 @@ Enrich cataloged media assets with local AI computer vision without modifying or
 # 1. Enrich cataloged assets with visual semantic features
 metadata-extractor enrich --enable-objects --enable-faces --enable-ocr
 
-# 2. Manage face clusters & assign names
+# 2. Manage face clusters, inspect top matching files & assign names
 metadata-extractor faces list
+metadata-extractor faces show --cluster-id <UUID> --limit 10
+# Open top matching photos directly in macOS Preview to identify the person:
+metadata-extractor faces show --cluster-id <UUID> --format paths | xargs open
+# Once identified, assign human name to cluster:
 metadata-extractor faces name --cluster-id <UUID> --name "Maya"
 metadata-extractor faces merge --source <UUID> --target <UUID>
 
@@ -342,6 +346,7 @@ metadata-extractor faces merge --source <UUID> --target <UUID>
 metadata-extractor search --object "teddy_bear"
 metadata-extractor search --occasion "birthday"
 metadata-extractor search --person "Maya" --expression "smile"
+metadata-extractor search --cluster-id <UUID>
 metadata-extractor search --text "Liam"
 metadata-extractor search "beach" --person "Maya" --year 2024 --format table
 

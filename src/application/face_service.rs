@@ -1,11 +1,33 @@
 use std::path::PathBuf;
 use std::sync::Arc;
+use serde::{Deserialize, Serialize};
 use tracing::info;
 use uuid::Uuid;
 
 use crate::domain::errors::{ExtractionError, StorageError};
 use crate::domain::person_cluster::{PersonCluster, FACE_CLUSTER_THRESHOLD_COSINE_DISTANCE};
 use crate::domain::ports::MetadataStorageSink;
+use crate::domain::visual_models::BoundingBox;
+
+/// Represents a photo matching a person cluster
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClusterPhotoMatch {
+    pub file_path: PathBuf,
+    pub doc_id: Uuid,
+    pub date: Option<String>,
+    pub face_confidence: f32,
+    pub expression: Option<String>,
+    pub expression_score: Option<f32>,
+    pub bounding_box: BoundingBox,
+}
+
+/// Comprehensive details of a person cluster and its matching media assets
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClusterDetails {
+    pub cluster: PersonCluster,
+    pub top_photos: Vec<ClusterPhotoMatch>,
+    pub total_photos: usize,
+}
 
 pub struct FaceManagementService {
     storage: Arc<dyn MetadataStorageSink>,
@@ -139,5 +161,78 @@ impl FaceManagementService {
     /// Merges source cluster into target cluster
     pub async fn merge_clusters(&self, source_id: Uuid, target_id: Uuid) -> Result<bool, StorageError> {
         self.storage.merge_person_clusters(source_id, target_id).await
+    }
+
+    /// Retrieves matching photo assets for a specific person cluster, sorted by face confidence descending
+    pub async fn get_cluster_photos(
+        &self,
+        cluster_id: Uuid,
+        limit: Option<usize>,
+    ) -> Result<Option<ClusterDetails>, ExtractionError> {
+        // Automatically cluster any newly extracted faces in the catalog
+        let _ = self.cluster_faces().await;
+
+        let clusters = self.storage.list_person_clusters().await.map_err(|e| {
+            ExtractionError::InferenceFailed {
+                path: PathBuf::new(),
+                message: format!("Failed listing clusters: {e}"),
+            }
+        })?;
+
+        let cluster = match clusters.into_iter().find(|c| c.id == cluster_id) {
+            Some(c) => c,
+            None => return Ok(None),
+        };
+
+        let masters = self
+            .storage
+            .query_catalog_for_visual()
+            .await
+            .map_err(|e| ExtractionError::InferenceFailed {
+                path: PathBuf::new(),
+                message: format!("Failed querying canonical masters: {e}"),
+            })?;
+
+        let mut matches = Vec::new();
+
+        for doc in masters {
+            if let Some(ref visual) = doc.visual {
+                for face in &visual.faces {
+                    if face.person_id == Some(cluster_id) {
+                        let top_expression = face
+                            .expressions
+                            .iter()
+                            .max_by(|a, b| a.score.partial_cmp(&b.score).unwrap_or(std::cmp::Ordering::Equal));
+
+                        matches.push(ClusterPhotoMatch {
+                            file_path: doc.file_context.file_path.clone(),
+                            doc_id: doc.id,
+                            date: Some(doc.temporal.iso_timestamp.clone()),
+                            face_confidence: face.confidence,
+                            expression: top_expression.map(|e| e.label.clone()),
+                            expression_score: top_expression.map(|e| e.score),
+                            bounding_box: face.bounding_box.clone(),
+                        });
+                    }
+                }
+            }
+        }
+
+        // Sort by face confidence descending so the clearest, highest-quality faces are on top
+        matches.sort_by(|a, b| {
+            b.face_confidence
+                .partial_cmp(&a.face_confidence)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        let total_photos = matches.len();
+        let max_items = limit.unwrap_or(10);
+        let top_photos = matches.into_iter().take(max_items).collect();
+
+        Ok(Some(ClusterDetails {
+            cluster,
+            top_photos,
+            total_photos,
+        }))
     }
 }

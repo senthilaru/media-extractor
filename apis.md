@@ -23,6 +23,10 @@ For primary setup and the unified command guide, see [README.md](README.md).
    - [report](#report-aliases-status-audit)
    - [purge](#purge-aliases-purge-source-remove-source-unindex)
    - [organize](#organize-alias-archive-pipeline)
+   - [enrich](#enrich)
+   - [faces](#faces)
+   - [search](#search)
+   - [albums](#albums)
    - [Multi-Drive Configuration Format (drives.yaml)](#multi-drive-configuration-format-drivesyaml)
 5. [Unix Pipelined Streaming Workflows](#5-unix-pipelined-streaming-workflows)
 6. [Direct MongoDB Ingestion & Query API](#6-direct-mongodb-ingestion--query-api)
@@ -839,6 +843,95 @@ When files are in `master_path`, they follow a neat temporal and category layout
 | `NeedsIngestToMaster` | Unique asset present only on a secondary drive. Needs to be ingested into master via `ingest`. |
 | `Removed` | File was physically unlinked from disk by `dedup prune --execute` or `ingest --delete-source`. |
 | `Conflict` | Multiple differing files found in the canonical master location requiring manual inspection. |
+
+---
+
+### Visual Semantic Enrichment & Face Management Subcommands
+
+#### `enrich`
+Enriches cataloged media assets with local AI computer vision (YOLOv8 objects/occasions, InsightFace 512-d embeddings, Apple Vision OCR) without touching files on disk (strictly read-only).
+
+```bash
+metadata-extractor enrich [OPTIONS]
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `--source <PATH>` | None | Optional root directory to restrict enrichment |
+| `--enable-objects` | `true` | Extract physical objects & event occasions (YOLOv8) |
+| `--enable-faces` | `true` | Extract faces, expressions & 512-d ArcFace embeddings (InsightFace) |
+| `--enable-ocr` | `true` | Extract visible in-image text snippets & tokens (Apple Vision) |
+| `--min-confidence <FLOAT>` | `0.60` | Minimum confidence threshold |
+| `-b, --batch-size <N>` | `50` | Batch size for hardware inference acceleration |
+| `--force` | `false` | Force re-analysis of already enriched media assets |
+| `--dry-run` | `false` | Run inference and preview results without writing to MongoDB |
+
+#### `faces`
+Manages facial recognition identity clusters, photo inspection, and human naming.
+
+##### `faces list`
+Lists all detected person clusters with photo counts:
+```bash
+metadata-extractor faces list [--unnamed-only] [--min-photos <N>]
+```
+
+##### `faces show` (aliases: `photos`, `files`)
+Shows matching photo files (top N photos, default: 10) for a specific cluster ID, ranked by face confidence descending:
+```bash
+# Display top 10 matching files in formatted table with confidence & emotions:
+metadata-extractor faces show --cluster-id <UUID> [--limit <N>]
+
+# Stream paths directly to open in macOS Preview:
+metadata-extractor faces show --cluster-id <UUID> --format paths | xargs open
+
+# Output structured JSON:
+metadata-extractor faces show --cluster-id <UUID> --format json
+```
+
+##### `faces name`
+Assigns a person's name to a specific cluster ID:
+```bash
+metadata-extractor faces name --cluster-id <UUID> --name "Maya"
+```
+
+##### `faces merge`
+Merges two duplicate person clusters into a single unified identity:
+```bash
+metadata-extractor faces merge --source <SOURCE_UUID> --target <TARGET_UUID>
+```
+
+#### `search`
+High-performance multi-modal semantic search across visual features, people, emotions, and OCR:
+
+```bash
+metadata-extractor search [QUERY] [OPTIONS]
+```
+
+| Flag | Example | Description |
+|---|---|---|
+| `[QUERY]` | `"beach"` | Free-text keyword search across tags, objects, OCR |
+| `--person <NAME>` | `--person "Maya"` | Filter by assigned person name |
+| `--cluster-id <UUID>` | `--cluster-id <UUID>` | Filter by person cluster UUID |
+| `--expression <EMOTION>` | `--expression "smile"` | Filter by facial expression (`smile`, `happy`, `sad`) |
+| `--object <LABEL>` | `--object "teddy_bear"` | Filter by physical object label |
+| `--occasion <TAG>` | `--occasion "birthday"` | Filter by scene or occasion context |
+| `--text <WORD>` | `--text "Liam"` | Filter by OCR text |
+| `--year <YYYY>` | `--year 2024` | Filter by calendar year |
+| `--format <FMT>` | `--format paths` | Output format: `table`, `paths`, `json` |
+
+#### `albums`
+Generates and manages virtual smart albums without duplicating files on disk:
+
+```bash
+# Synthesize smart albums for a calendar year:
+metadata-extractor albums generate --year 2024 [--min-photos 3] [--dry-run]
+
+# List all synthesized smart albums:
+metadata-extractor albums list
+
+# Export virtual album as symlinks, hardlinks, or copy:
+metadata-extractor albums export --album-id <UUID> --destination <PATH> [--strategy symlink|copy|hardlink]
+```
 
 ---
 

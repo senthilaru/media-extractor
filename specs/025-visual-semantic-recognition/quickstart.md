@@ -47,18 +47,29 @@ This guide provides end-to-end scenarios to test and validate the visual enrichm
    ```bash
    target/release/metadata-extractor faces list --unnamed-only
    ```
-   **Expected Output**: Displays clusters with face counts and representative timestamps:
+   **Expected Output**: Displays clusters with face counts:
    ```text
-   Cluster ID                             Photos  Sample Date
-   ------------------------------------  ------  -----------
-   a3f81e22-0941-4cb7-91a5-349019b8821a      42  2024-07-14
-   b7194cc1-1209-411a-8109-1240188bb010      18  2024-07-14
+   Cluster ID                           | Name                 | Photos  
+   ----------------------------------------------------------------------
+   a3f81e22-0941-4cb7-91a5-349019b8821a | [Unnamed]            | 42      
+   b7194cc1-1209-411a-8109-1240188bb010 | [Unnamed]            | 18      
    ```
-3. **Assign human identity to cluster**:
+
+3. **Inspect top matching photos to identify the person**:
+   ```bash
+   # Display top 10 photo matches with confidence and facial expressions
+   target/release/metadata-extractor faces show --cluster-id a3f81e22-0941-4cb7-91a5-349019b8821a --limit 10
+
+   # Or open them directly in macOS Preview to visually see who it is:
+   target/release/metadata-extractor faces show --cluster-id a3f81e22-0941-4cb7-91a5-349019b8821a --format paths | xargs open
+   ```
+
+4. **Assign human identity to cluster**:
    ```bash
    target/release/metadata-extractor faces name --cluster-id a3f81e22-0941-4cb7-91a5-349019b8821a --name "Maya"
    ```
-4. **Search by person and emotion**:
+
+5. **Search by person and emotion**:
    ```bash
    target/release/metadata-extractor search --person "Maya" --expression "smile"
    ```

@@ -279,6 +279,21 @@ enum FacesCommands {
         #[arg(long)]
         min_photos: Option<usize>,
     },
+    /// Shows matching photo files for a specific person cluster (top N photos)
+    #[command(visible_alias = "photos", visible_alias = "files")]
+    Show {
+        /// The person cluster UUID
+        #[arg(long, visible_alias = "id")]
+        cluster_id: uuid::Uuid,
+
+        /// Maximum number of photos to display (default: 10)
+        #[arg(short = 'n', long, default_value_t = 10)]
+        limit: usize,
+
+        /// Output format (table, paths, json)
+        #[arg(long, default_value = "table")]
+        format: String,
+    },
     /// Assigns a name to a specific person cluster ID
     Name {
         #[arg(long)]
@@ -304,6 +319,10 @@ struct SearchArgs {
     /// Filter by recognized person name
     #[arg(long)]
     person: Option<String>,
+
+    /// Filter by recognized person cluster ID
+    #[arg(long)]
+    cluster_id: Option<uuid::Uuid>,
 
     /// Filter by facial expression (smile, happy, sad, crying)
     #[arg(long)]
@@ -2703,6 +2722,7 @@ async fn run_search(args: SearchArgs) -> Result<(), Box<dyn std::error::Error>> 
     let criteria = metadata_extractor::application::search_service::SearchCriteria {
         query: args.query,
         person: args.person,
+        cluster_id: args.cluster_id,
         expression: args.expression,
         object: args.object,
         occasion: args.occasion,
@@ -2745,6 +2765,94 @@ async fn run_faces(args: FacesArgs) -> Result<(), Box<dyn std::error::Error>> {
                 for c in clusters {
                     let name = c.display_name.unwrap_or_else(|| "[Unnamed]".to_string());
                     println!("{:<36} | {:<20} | {:<8}", c.id, name, c.total_photo_count);
+                }
+            }
+        }
+        FacesCommands::Show {
+            cluster_id,
+            limit,
+            format,
+        } => {
+            let details = face_service.get_cluster_photos(cluster_id, Some(limit)).await?;
+            match details {
+                None => {
+                    eprintln!("Cluster {} not found.", cluster_id);
+                }
+                Some(details) => {
+                    let name = details
+                        .cluster
+                        .display_name
+                        .as_deref()
+                        .unwrap_or("[Unnamed]");
+
+                    match format.to_lowercase().as_str() {
+                        "paths" => {
+                            for photo in &details.top_photos {
+                                println!("{}", photo.file_path.display());
+                            }
+                        }
+                        "json" => {
+                            let json_str = serde_json::to_string_pretty(&details)?;
+                            println!("{}", json_str);
+                        }
+                        _ => {
+                            println!("================================================================================");
+                            println!("PERSON CLUSTER DETAILS: {}", details.cluster.id);
+                            println!("================================================================================");
+                            println!("Name         : {}", name);
+                            println!(
+                                "Total Photos : {} (showing top {})",
+                                details.total_photos,
+                                details.top_photos.len()
+                            );
+                            println!(
+                                "Created At   : {}",
+                                details.cluster.created_at.format("%Y-%m-%d %H:%M:%S UTC")
+                            );
+                            println!("--------------------------------------------------------------------------------");
+                            println!(
+                                "{:<3} | {:<10} | {:<10} | {:<18} | {}",
+                                "#", "Date", "Confidence", "Expression", "File Path"
+                            );
+                            println!("{}", "-".repeat(80));
+
+                            for (i, photo) in details.top_photos.iter().enumerate() {
+                                let date_str = photo
+                                    .date
+                                    .as_deref()
+                                    .and_then(|d| d.split('T').next())
+                                    .unwrap_or("Unknown");
+                                let conf_str = format!("{:.1}%", photo.face_confidence * 100.0);
+                                let expr_str = match (&photo.expression, photo.expression_score) {
+                                    (Some(e), Some(s)) => format!("{} ({:.0}%)", e, s * 100.0),
+                                    (Some(e), None) => e.clone(),
+                                    _ => "N/A".to_string(),
+                                };
+
+                                println!(
+                                    "{:<3} | {:<10} | {:<10} | {:<18} | {}",
+                                    i + 1,
+                                    date_str,
+                                    conf_str,
+                                    expr_str,
+                                    photo.file_path.display()
+                                );
+                            }
+
+                            println!("--------------------------------------------------------------------------------");
+                            println!("💡 Tip: To inspect photos in macOS Preview, run:");
+                            println!(
+                                "   metadata-extractor faces show --cluster-id {} --format paths | xargs open",
+                                details.cluster.id
+                            );
+                            println!("💡 Tip: To name this person, run:");
+                            println!(
+                                "   metadata-extractor faces name --cluster-id {} --name \"<Person Name>\"",
+                                details.cluster.id
+                            );
+                            println!("================================================================================");
+                        }
+                    }
                 }
             }
         }

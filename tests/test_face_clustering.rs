@@ -220,8 +220,25 @@ async fn test_face_detection_clustering_naming_and_search() {
     let name_success_2 = face_service.name_cluster(grandpa_cluster.id, "Grandpa").await.unwrap();
     assert!(name_success_2);
 
-    // 4. Test multi-modal search by person name and facial expression
+    // 3b. Verify get_cluster_photos for inspecting top matching files
+    let maya_details = face_service.get_cluster_photos(maya_cluster.id, Some(10)).await.unwrap().unwrap();
+    assert_eq!(maya_details.total_photos, 2);
+    assert_eq!(maya_details.top_photos.len(), 2);
+    assert_eq!(maya_details.top_photos[0].doc_id, doc_id_1);
+    assert_eq!(maya_details.top_photos[0].file_path, PathBuf::from("/test/maya_smiling.jpg"));
+
+    // 4. Test multi-modal search by person name, cluster_id, and facial expression
     let search_service = SearchService::new(storage.clone());
+
+    // Search by cluster_id directly
+    let cluster_results = search_service
+        .execute_search(&SearchCriteria {
+            cluster_id: Some(maya_cluster.id),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(cluster_results.len(), 2, "Searching by cluster_id should return both of Maya's photos");
 
     // Search for Maya with smile
     let maya_smile = search_service

@@ -45,6 +45,16 @@ Lists recognized person clusters across the library.
 metadata-extractor faces list [--unnamed-only] [--min-photos <N>]
 ```
 
+#### `faces show` (aliases: `photos`, `files`)
+Inspects the top matching photos for a specific cluster ID to visually identify the person before naming.
+```bash
+# Display top 10 matching files in table format with face confidence & expression
+metadata-extractor faces show --cluster-id <UUID> [--limit <N>] [--format table|paths|json]
+
+# Stream paths directly into image viewers on macOS (e.g. Preview)
+metadata-extractor faces show --cluster-id <UUID> --format paths | xargs open
+```
+
 #### `faces name`
 Assigns a person's name to a specific cluster ID.
 ```bash
@@ -73,6 +83,7 @@ metadata-extractor search [QUERY] [OPTIONS]
 | :--- | :--- | :--- | :--- |
 | `[QUERY]` | `String` | `"bicycle"` | Free-text keyword search across tags, objects, and OCR words |
 | `--person <NAME>` | `String` | `--person "Maya"` | Filter by recognized person name |
+| `--cluster-id <UUID>` | `Uuid` | `--cluster-id <UUID>` | Filter by recognized person cluster UUID |
 | `--expression <EMOTION>`| `String` | `--expression "smile"` | Filter by facial expression (`smile`, `happy`, `crying`) |
 | `--object <LABEL>` | `String` | `--object "teddy_bear"` | Filter by detected physical object |
 | `--occasion <TAG>` | `String` | `--occasion "birthday"` | Filter by scene or occasion context |
