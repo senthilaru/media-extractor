@@ -110,8 +110,8 @@ impl AiSidecarClient {
         });
 
         let http_client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(180))
-            .pool_idle_timeout(Duration::from_secs(30))
+            .timeout(Duration::from_secs(300))
+            .pool_idle_timeout(Duration::from_secs(10))
             .tcp_keepalive(Duration::from_secs(60))
             .build()
             .expect("Failed to build HTTP client for AI sidecar");
@@ -232,8 +232,8 @@ impl AiSidecarClient {
             *lock = Some(child);
         }
 
-        // Wait up to 5 seconds for health endpoint to respond
-        for attempt in 1..=25 {
+        // Wait up to 15 seconds for health endpoint to respond
+        for attempt in 1..=75 {
             tokio::time::sleep(Duration::from_millis(200)).await;
             if self.check_health().await.unwrap_or(false) {
                 info!("AI sidecar successfully spawned and ready (attempt {})", attempt);
@@ -243,7 +243,7 @@ impl AiSidecarClient {
         }
 
         Err(AiClientError::Timeout(format!(
-            "Sidecar process failed to become ready at {} within 5 seconds",
+            "Sidecar process failed to become ready at {} within 15 seconds",
             self.base_url
         )))
     }
@@ -261,80 +261,81 @@ impl AiSidecarClient {
         }
     }
 
+    /// Helper to post JSON with automatic retry on broken pooled socket or transient IPC connection reset
+    async fn post_with_retry<T: Serialize + ?Sized, R: for<'de> Deserialize<'de>>(
+        &self,
+        endpoint: &str,
+        payload: &T,
+    ) -> Result<R, AiClientError> {
+        let mut attempts = 0;
+        loop {
+            attempts += 1;
+            let resp_res = self
+                .http_client
+                .post(endpoint)
+                .json(payload)
+                .send()
+                .await;
+
+            match resp_res {
+                Ok(resp) => {
+                    if !resp.status().is_success() {
+                        let status = resp.status().as_u16();
+                        let body = resp.text().await.unwrap_or_default();
+                        return Err(AiClientError::ServiceError(status, body));
+                    }
+                    let data: R = resp.json().await?;
+                    return Ok(data);
+                }
+                Err(e) => {
+                    if attempts < 3 && (e.is_connect() || e.is_request() || e.is_timeout()) {
+                        warn!(
+                            "AI sidecar IPC request to {} failed ({}), retrying attempt {}...",
+                            endpoint,
+                            e,
+                            attempts + 1
+                        );
+                        tokio::time::sleep(Duration::from_millis(250)).await;
+                        continue;
+                    }
+                    return Err(AiClientError::Http(e));
+                }
+            }
+        }
+    }
+
     /// Batch infer objects and occasions
     pub async fn enrich_objects_scenes(&self, paths: &[PathBuf]) -> Result<Vec<ObjectSceneResponse>, AiClientError> {
         let string_paths: Vec<String> = paths.iter().map(|p| p.to_string_lossy().to_string()).collect();
         let endpoint = format!("{}/v1/enrich/objects-scenes", self.base_url);
-
-        let resp = self
-            .http_client
-            .post(&endpoint)
-            .json(&BatchPathsRequest { file_paths: &string_paths })
-            .send()
-            .await?;
-
-        if !resp.status().is_success() {
-            let status = resp.status().as_u16();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(AiClientError::ServiceError(status, body));
-        }
-
-        let results: Vec<ObjectSceneResponse> = resp.json().await?;
-        Ok(results)
+        self.post_with_retry(&endpoint, &BatchPathsRequest { file_paths: &string_paths }).await
     }
 
     /// Batch infer faces, expressions, and embeddings
     pub async fn enrich_faces(&self, paths: &[PathBuf]) -> Result<Vec<FaceResponse>, AiClientError> {
         let string_paths: Vec<String> = paths.iter().map(|p| p.to_string_lossy().to_string()).collect();
         let endpoint = format!("{}/v1/enrich/faces", self.base_url);
-
-        let resp = self
-            .http_client
-            .post(&endpoint)
-            .json(&BatchPathsRequest { file_paths: &string_paths })
-            .send()
-            .await?;
-
-        if !resp.status().is_success() {
-            let status = resp.status().as_u16();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(AiClientError::ServiceError(status, body));
-        }
-
-        let results: Vec<FaceResponse> = resp.json().await?;
-        Ok(results)
+        self.post_with_retry(&endpoint, &BatchPathsRequest { file_paths: &string_paths }).await
     }
 
     /// Batch infer text OCR
     pub async fn enrich_ocr(&self, paths: &[PathBuf]) -> Result<Vec<OcrResponse>, AiClientError> {
         let string_paths: Vec<String> = paths.iter().map(|p| p.to_string_lossy().to_string()).collect();
         let endpoint = format!("{}/v1/enrich/ocr", self.base_url);
-
-        let resp = self
-            .http_client
-            .post(&endpoint)
-            .json(&BatchPathsRequest { file_paths: &string_paths })
-            .send()
-            .await?;
-
-        if !resp.status().is_success() {
-            let status = resp.status().as_u16();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(AiClientError::ServiceError(status, body));
-        }
-
-        let results: Vec<OcrResponse> = resp.json().await?;
-        Ok(results)
+        self.post_with_retry(&endpoint, &BatchPathsRequest { file_paths: &string_paths }).await
     }
 }
 
 impl Drop for AiSidecarClient {
     fn drop(&mut self) {
-        if let Ok(mut lock) = self.child_process.lock() {
-            if let Some(mut child) = lock.take() {
-                debug!("Terminating spawned AI sidecar child process");
-                let _ = child.kill();
-                let _ = child.wait();
+        // Only terminate child process if this is the last remaining owner
+        if Arc::strong_count(&self.child_process) == 1 {
+            if let Ok(mut lock) = self.child_process.lock() {
+                if let Some(mut child) = lock.take() {
+                    debug!("Terminating spawned AI sidecar child process");
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
             }
         }
     }

@@ -103,7 +103,7 @@ if HAS_FASTAPI:
         return extract_ocr(req.file_paths)
 
     def run_server(host: str, port: int):
-        uvicorn.run(app, host=host, port=port, log_level="info")
+        uvicorn.run(app, host=host, port=port, log_level="info", timeout_keep_alive=120)
 
 else:
     # Standard library fallback server
