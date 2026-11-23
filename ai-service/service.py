@@ -68,9 +68,25 @@ if HAS_FASTAPI:
 
     @app.get("/health")
     def health():
+        try:
+            from pipelines.object_scene import HAS_YOLO
+        except Exception:
+            HAS_YOLO = False
+        try:
+            from pipelines.face_engine import HAS_INSIGHTFACE
+        except Exception:
+            HAS_INSIGHTFACE = False
+        try:
+            from pipelines.ocr_engine import HAS_VISION
+        except Exception:
+            HAS_VISION = False
+
         return {
             "status": "ok",
             "service": "media-extractor-ai",
+            "has_yolo": HAS_YOLO,
+            "has_faces": HAS_INSIGHTFACE,
+            "has_ocr": HAS_VISION,
             "version": "0.1.0",
         }
 
@@ -107,6 +123,9 @@ else:
                 self._send_json(200, {
                     "status": "ok",
                     "service": "media-extractor-ai",
+                    "has_yolo": False,
+                    "has_faces": False,
+                    "has_ocr": False,
                     "version": "0.1.0 (standard-library fallback)",
                 })
             else:

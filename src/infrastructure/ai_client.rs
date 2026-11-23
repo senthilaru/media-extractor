@@ -85,9 +85,15 @@ struct BatchPathsRequest<'a> {
 
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
-struct HealthResponse {
-    status: String,
-    service: String,
+pub struct HealthResponse {
+    pub status: String,
+    pub service: Option<String>,
+    #[serde(default)]
+    pub has_yolo: bool,
+    #[serde(default)]
+    pub has_faces: bool,
+    #[serde(default)]
+    pub has_ocr: bool,
 }
 
 #[derive(Clone)]
@@ -131,10 +137,19 @@ impl AiSidecarClient {
         }
     }
 
+    /// Query the full health and capabilities report from the sidecar
+    pub async fn query_health(&self) -> Result<HealthResponse, AiClientError> {
+        let endpoint = format!("{}/health", self.base_url);
+        let resp = self.http_client.get(&endpoint).send().await?;
+        let health: HealthResponse = resp.json().await?;
+        Ok(health)
+    }
+
     /// Ensure sidecar is running; if not, spawn it and wait until healthy
     pub async fn ensure_service_running(&self, sidecar_script_dir: Option<&Path>) -> Result<(), AiClientError> {
         if self.check_health().await.unwrap_or(false) {
             debug!("AI sidecar already running and healthy at {}", self.base_url);
+            self.warn_if_models_missing().await;
             return Ok(());
         }
 
@@ -156,10 +171,26 @@ impl AiSidecarClient {
             return Ok(());
         }
 
+        // Auto-bootstrap virtual environment if missing
+        let mut venv_python = script_dir.join(".venv/bin/python3");
+        if !venv_python.exists() {
+            let setup_script = script_dir.join("setup.sh");
+            if setup_script.exists() {
+                eprintln!("================================================================================");
+                eprintln!("[AI Service] First-time setup: Initializing AI virtual environment...");
+                eprintln!("             Running ai-service/setup.sh to install PyTorch, YOLOv8 & InsightFace...");
+                eprintln!("================================================================================");
+                let _ = Command::new("bash")
+                    .arg(&setup_script)
+                    .current_dir(&script_dir)
+                    .status();
+                venv_python = script_dir.join(".venv/bin/python3");
+            }
+        }
+
         let script_abs = std::fs::canonicalize(&service_script)
             .unwrap_or_else(|_| service_script.clone());
 
-        let venv_python = script_dir.join(".venv/bin/python3");
         let (python_cmd, venv_dir) = if venv_python.exists() {
             let abs_venv_py = std::env::current_dir()
                 .map(|cwd| cwd.join(&venv_python))
@@ -204,6 +235,7 @@ impl AiSidecarClient {
             tokio::time::sleep(Duration::from_millis(200)).await;
             if self.check_health().await.unwrap_or(false) {
                 info!("AI sidecar successfully spawned and ready (attempt {})", attempt);
+                self.warn_if_models_missing().await;
                 return Ok(());
             }
         }
@@ -212,6 +244,19 @@ impl AiSidecarClient {
             "Sidecar process failed to become ready at {} within 5 seconds",
             self.base_url
         )))
+    }
+
+    async fn warn_if_models_missing(&self) {
+        if let Ok(health) = self.query_health().await {
+            if !health.has_yolo {
+                eprintln!("⚠️  [AI Notice] YOLOv8 is not active. Object recognition will be skipped.");
+                eprintln!("   To enable object recognition, run: bash ai-service/setup.sh");
+            }
+            if !health.has_faces {
+                eprintln!("⚠️  [AI Notice] InsightFace is not active. Facial recognition will be skipped.");
+                eprintln!("   To enable face recognition, run: bash ai-service/setup.sh");
+            }
+        }
     }
 
     /// Batch infer objects and occasions
