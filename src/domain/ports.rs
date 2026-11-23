@@ -274,6 +274,11 @@ pub trait MetadataStorageSink: Send + Sync {
     /// Queries all authoritative canonical master documents currently stored in the database.
     async fn query_canonical_masters(&self) -> Result<Vec<MediaMetadataDocument>, StorageError>;
 
+    /// Queries active media documents in the catalog eligible for visual inspection, search, and smart albums.
+    async fn query_catalog_for_visual(&self) -> Result<Vec<MediaMetadataDocument>, StorageError> {
+        self.query_canonical_masters().await
+    }
+
     /// Queries replica documents associated with a specific replica drive ID.
     async fn query_replica_documents(
         &self,

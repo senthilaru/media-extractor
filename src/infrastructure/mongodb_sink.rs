@@ -1223,6 +1223,43 @@ impl MetadataStorageSink for MongoDbStorageSink {
         Ok(masters)
     }
 
+    async fn query_catalog_for_visual(&self) -> Result<Vec<MediaMetadataDocument>, StorageError> {
+        let filter = doc! {
+            "dedup.status": {
+                "$ne": DeduplicationStatus::Removed.to_string()
+            }
+        };
+
+        let mut cursor =
+            self.collection
+                .find(filter)
+                .await
+                .map_err(|e| StorageError::QueryFailed {
+                    collection: self.config.collection_name.clone(),
+                    message: format!("Failed querying catalog for visual: {}", e),
+                })?;
+
+        let mut results = Vec::new();
+        while let Some(raw_doc) =
+            cursor
+                .try_next()
+                .await
+                .map_err(|e| StorageError::QueryFailed {
+                    collection: self.config.collection_name.clone(),
+                    message: format!("Cursor error on catalog for visual: {}", e),
+                })?
+        {
+            match bson_document_to_doc(raw_doc) {
+                Ok(doc) => results.push(doc),
+                Err(err) => {
+                    tracing::warn!(error = %err, "Skipping unparseable document");
+                }
+            }
+        }
+
+        Ok(results)
+    }
+
     async fn query_replica_documents(
         &self,
         replica_drive_id: &str,
@@ -1704,11 +1741,18 @@ impl MetadataStorageSink for MongoDbStorageSink {
         let escaped = regex_escape(source_prefix);
         let pattern = format!("^{}", escaped);
         let filter = doc! {
-            "$or": [
-                { "file_context.file_path": { "$regex": &pattern } },
-                { "fingerprint.file_path": { "$regex": &pattern } },
-                { "file_context.original_source_path": { "$regex": &pattern } },
-                { "file_context.scanned_root": { "$regex": &pattern } },
+            "$and": [
+                {
+                    "dedup.status": { "$ne": DeduplicationStatus::Removed.to_string() }
+                },
+                {
+                    "$or": [
+                        { "file_context.file_path": { "$regex": &pattern, "$options": "i" } },
+                        { "fingerprint.file_path": { "$regex": &pattern, "$options": "i" } },
+                        { "file_context.original_source_path": { "$regex": &pattern, "$options": "i" } },
+                        { "file_context.scanned_root": { "$regex": &pattern, "$options": "i" } },
+                    ]
+                }
             ]
         };
 

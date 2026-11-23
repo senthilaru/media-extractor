@@ -73,22 +73,47 @@ impl VisualEnrichmentService {
         let start_time = Instant::now();
         info!("Beginning visual semantic enrichment run: {:?}", options);
 
-        // Fetch canonical master documents
-        let all_masters = self
-            .storage
-            .query_canonical_masters()
-            .await
-            .map_err(|e| ExtractionError::InferenceFailed {
-                path: PathBuf::new(),
-                message: format!("Failed to query canonical masters: {e}"),
-            })?;
+        // Fetch candidate documents matching criteria: if source prefix is given, query by prefix.
+        // Otherwise, fetch active catalog documents.
+        let pool = if let Some(ref prefix) = options.source {
+            let prefix_str = prefix.to_string_lossy();
+            let mut docs = self
+                .storage
+                .query_by_source_path_prefix(&prefix_str)
+                .await
+                .map_err(|e| ExtractionError::InferenceFailed {
+                    path: PathBuf::new(),
+                    message: format!("Failed to query documents by source prefix: {e}"),
+                })?;
+            if docs.is_empty() {
+                docs = self.storage.query_catalog_for_visual().await.map_err(|e| {
+                    ExtractionError::InferenceFailed {
+                        path: PathBuf::new(),
+                        message: format!("Failed to query catalog for visual: {e}"),
+                    }
+                })?;
+            }
+            docs
+        } else {
+            self.storage
+                .query_catalog_for_visual()
+                .await
+                .map_err(|e| ExtractionError::InferenceFailed {
+                    path: PathBuf::new(),
+                    message: format!("Failed to query catalog for visual: {e}"),
+                })?
+        };
 
         // Filter candidates based on source path prefix and existing visual status
-        let candidates: Vec<MediaMetadataDocument> = all_masters
+        let candidates: Vec<MediaMetadataDocument> = pool
             .into_iter()
             .filter(|doc| {
                 if let Some(ref prefix) = options.source {
-                    if !doc.file_context.file_path.starts_with(prefix) {
+                    let doc_str = doc.file_context.file_path.to_string_lossy();
+                    let prefix_str = prefix.to_string_lossy();
+                    if !doc_str.starts_with(prefix_str.as_ref())
+                        && !doc_str.to_lowercase().starts_with(&prefix_str.to_lowercase())
+                    {
                         return false;
                     }
                 }

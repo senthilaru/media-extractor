@@ -52,7 +52,7 @@ impl SearchService {
     ) -> Result<Vec<MediaMetadataDocument>, ExtractionError> {
         let all_masters = self
             .storage
-            .query_canonical_masters()
+            .query_catalog_for_visual()
             .await
             .map_err(|e| ExtractionError::InferenceFailed {
                 path: PathBuf::new(),

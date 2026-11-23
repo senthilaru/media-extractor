@@ -141,7 +141,13 @@ impl AiSidecarClient {
 
         let script_dir = sidecar_script_dir
             .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| PathBuf::from("ai-service"));
+            .unwrap_or_else(|| {
+                if PathBuf::from("ai-service/service.py").exists() {
+                    PathBuf::from("ai-service")
+                } else {
+                    PathBuf::from(".")
+                }
+            });
 
         let service_script = script_dir.join("service.py");
         if !service_script.exists() {
@@ -149,7 +155,13 @@ impl AiSidecarClient {
             return Ok(());
         }
 
-        let python_cmd = if let Ok(venv_py) = std::env::var("VIRTUAL_ENV") {
+        let script_abs = std::fs::canonicalize(&service_script)
+            .unwrap_or_else(|_| service_script.clone());
+
+        let venv_python = script_dir.join(".venv/bin/python3");
+        let python_cmd = if venv_python.exists() {
+            venv_python.to_string_lossy().to_string()
+        } else if let Ok(venv_py) = std::env::var("VIRTUAL_ENV") {
             let p = PathBuf::from(venv_py).join("bin/python3");
             if p.exists() { p.to_string_lossy().to_string() } else { "python3".to_string() }
         } else {
@@ -157,7 +169,7 @@ impl AiSidecarClient {
         };
 
         let child = Command::new(&python_cmd)
-            .arg(&service_script)
+            .arg(&script_abs)
             .current_dir(&script_dir)
             .stdout(Stdio::null())
             .stderr(Stdio::inherit())
