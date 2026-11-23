@@ -107,14 +107,17 @@ if HAS_FASTAPI:
 
 else:
     # Standard library fallback server
-    from http.server import HTTPServer, BaseHTTPRequestHandler
+    from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 
     class FallbackHandler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
         def _send_json(self, status_code: int, data: Any):
             payload = json.dumps(data).encode("utf-8")
             self.send_response(status_code)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(payload)))
+            self.send_header("Connection", "keep-alive")
             self.end_headers()
             self.wfile.write(payload)
 
@@ -132,32 +135,37 @@ else:
                 self._send_json(404, {"error": "Not found"})
 
         def do_POST(self):
-            content_length = int(self.headers.get("Content-Length", 0))
-            body = self.rfile.read(content_length).decode("utf-8")
             try:
+                content_length = int(self.headers.get("Content-Length", 0))
+                body = self.rfile.read(content_length).decode("utf-8") if content_length > 0 else "{}"
                 data = json.loads(body) if body else {}
                 paths = data.get("file_paths", [])
-            except Exception as e:
-                self._send_json(400, {"error": f"Invalid JSON: {e}"})
-                return
 
-            if self.path == "/v1/enrich/objects-scenes":
-                results = detect_objects_and_scenes(paths)
-                self._send_json(200, results)
-            elif self.path == "/v1/enrich/faces":
-                results = extract_faces(paths)
-                self._send_json(200, results)
-            elif self.path == "/v1/enrich/ocr":
-                results = extract_ocr(paths)
-                self._send_json(200, results)
-            else:
-                self._send_json(404, {"error": "Endpoint not found"})
+                if self.path == "/v1/enrich/objects-scenes":
+                    results = detect_objects_and_scenes(paths)
+                    self._send_json(200, results)
+                elif self.path == "/v1/enrich/faces":
+                    results = extract_faces(paths)
+                    self._send_json(200, results)
+                elif self.path == "/v1/enrich/ocr":
+                    results = extract_ocr(paths)
+                    self._send_json(200, results)
+                else:
+                    self._send_json(404, {"error": "Endpoint not found"})
+            except Exception as e:
+                import traceback
+                print(f"[AI Service] Error in POST {self.path}: {e}", file=sys.stderr)
+                traceback.print_exc()
+                try:
+                    self._send_json(500, {"error": str(e)})
+                except Exception:
+                    pass
 
         def log_message(self, format, *args):
             pass  # Keep stderr clean
 
     def run_server(host: str, port: int):
-        server = HTTPServer((host, port), FallbackHandler)
+        server = ThreadingHTTPServer((host, port), FallbackHandler)
         print(f"[AI Service] Started on http://{host}:{port} (standard library fallback mode)")
         server.serve_forever()
 

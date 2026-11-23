@@ -110,7 +110,9 @@ impl AiSidecarClient {
         });
 
         let http_client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(60))
+            .timeout(Duration::from_secs(180))
+            .pool_idle_timeout(Duration::from_secs(30))
+            .tcp_keepalive(Duration::from_secs(60))
             .build()
             .expect("Failed to build HTTP client for AI sidecar");
 
