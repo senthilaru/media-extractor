@@ -41,3 +41,5 @@ ai-service/models/
 ai-service/__pycache__/
 
 *.pt
+output_reels/
+audio_cache/
